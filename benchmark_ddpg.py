@@ -5,6 +5,32 @@ from colorama import Fore, Style, init
 init(autoreset=True)
 
 
+
+config = {
+    "project_name": "jaxrl",
+    "env_name": "Pendulum-v1",
+    "total_timesteps": 100_000,
+    "lr": 2.5e-4,
+    "gamma": 0.99,
+    "tau": 0.001,
+    "target_update_freq": 1,
+    "epsilon_start": 1.0,
+    "epsilon_end": 0.05,
+    "exploration_fraction": 0.5,
+    "num_env": 1,
+    "train_freq": 10,
+    "train_batch_size": 128,
+    "buffer_size": 1e6,
+    "learning_start": 1e4,
+    "test_freq": 10_000,       
+    "test_num_steps": 2000,
+    "test_num_env": 16,
+    "features": (128, 64),    
+    "seed": 0,
+    "log_freq": 1000,          
+    "wandb": False,
+}
+
 def warmup_inner(train_one_step, rollout_and_push, update_model,
                  train_key, gamma, tau, 
                  qnet, actor, opt, 
@@ -71,7 +97,7 @@ if __name__ == "__main__":
     # Only jit inner function
     print("--------------- Only jit inner function ----------------")
     print("warmup finished")
-    run_name, qnet_params, actor_params = ddpg.run_training(ddpg.config, warmup=warmup_inner)
+    run_name, qnet_params, actor_params = ddpg.run_training(config, warmup=warmup_inner)
     print(f"{Fore.GREEN}rollout_and_push compile times: {ddpg.rollout_and_push._cache_size()}")
     print(f"{Fore.GREEN}update_model compile times: {ddpg.update_model._cache_size()}")
         
@@ -85,5 +111,5 @@ if __name__ == "__main__":
                          "is_update_target_model", "is_update_model"],
         donate_argnames=["buffer_state"])
     print("warmup finished")
-    run_name, qnet_params, actor_params = ddpg.run_training(ddpg.config, warmup=warmup_outer)
+    run_name, qnet_params, actor_params = ddpg.run_training(config, warmup=warmup_outer)
     print(f"{Fore.GREEN}train_one_step compile times: {ddpg.train_one_step._cache_size()}")
