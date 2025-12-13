@@ -1,6 +1,8 @@
 #%%
 import jax
 from jax import numpy as jnp, random
+import sys
+sys.path.insert(0, 'vendor')
 import gymnax
 from gymnax.wrappers import LogWrapper
 from gymnax.wrappers.purerl import GymnaxWrapper, LogEnvState

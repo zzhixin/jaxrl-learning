@@ -2,6 +2,8 @@
 from functools import partial
 import jax
 from jax import numpy as jnp
+import sys
+sys.path.insert(0, 'vendor')
 import gymnax
 from gymnax.wrappers import LogWrapper
 

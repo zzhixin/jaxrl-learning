@@ -17,6 +17,8 @@
 
 import warnings
 warnings.filterwarnings("ignore")
+import sys
+sys.path.insert(0, 'vendor')
 import gymnax
 import numpy as np
 import jax
@@ -267,7 +269,7 @@ def prepare(key, config):
         qnet_opt_state, actor_opt_state,  
     ) 
 
-def run_training(config, warmup=None):
+def run_training(config, warmup=None, silent=False):
     run_name = config["env_name"] + "__ddpg__" + datetime.now().strftime('%Y%m%d_%H%M%S')
 
     if config["wandb"]:
@@ -287,7 +289,8 @@ def run_training(config, warmup=None):
     gamma = config["gamma"]
     tau = config["tau"]
     log_freq = config["log_freq"] 
-    print(f"config:\n{pprint.pformat(config)}")
+    if not silent:
+        print(f"config:\n{pprint.pformat(config)}")
 
     key = random.key(config["seed"])
     key, init_key, train_key, test_key = random.split(key, 4)

@@ -96,8 +96,7 @@ def warmup_outer(train_one_step, rollout_and_push, update_model,
 if __name__ == "__main__":
     # Only jit inner function
     print("--------------- Only jit inner function ----------------")
-    print("warmup finished")
-    run_name, qnet_params, actor_params = ddpg.run_training(config, warmup=warmup_inner)
+    run_name, qnet_params, actor_params = ddpg.run_training(config, warmup=warmup_inner, silent=True)
     print(f"{Fore.GREEN}rollout_and_push compile times: {ddpg.rollout_and_push._cache_size()}")
     print(f"{Fore.GREEN}update_model compile times: {ddpg.update_model._cache_size()}")
         
@@ -110,6 +109,5 @@ if __name__ == "__main__":
                          "buffer", "num_steps",
                          "is_update_target_model", "is_update_model"],
         donate_argnames=["buffer_state"])
-    print("warmup finished")
-    run_name, qnet_params, actor_params = ddpg.run_training(config, warmup=warmup_outer)
+    run_name, qnet_params, actor_params = ddpg.run_training(config, warmup=warmup_outer, silent=True)
     print(f"{Fore.GREEN}train_one_step compile times: {ddpg.train_one_step._cache_size()}")
