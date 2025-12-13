@@ -45,6 +45,3 @@ for i in range(100):
     sample = i%2
     buffer_state, model_params = train_one_step(buffer, buffer_state, model_params)  
 print(f"Elapsed time: {time.time() - start_time:.5f}s")
-
-
-
