@@ -1,3 +1,4 @@
+import time
 import ddpg
 import jax
 from jax import random, numpy as jnp
@@ -92,11 +93,68 @@ def warmup_outer(train_one_step, rollout_and_push, update_model,
     return qnet_params, target_qnet_params, qnet_opt_state, actor_params, target_actor_params, actor_opt_state, env_states, buffer_state
 
 
+def benchmark(config, warmup, n_iters=1000):
+    
+    # extrac configurations
+    num_steps_per_rollout = config["train_freq"] // config["num_env"]
+    gamma = config["gamma"]
+    tau = config["tau"]
+
+    key = random.key(config["seed"])
+    key, init_key, train_key, test_key = random.split(key, 4)
+    (
+        env, env_params, env_states, 
+        test_env, test_env_params, 
+        buffer, buffer_state, 
+        qnet, actor, opt, 
+        qnet_params, actor_params, target_qnet_params, target_actor_params,
+        qnet_opt_state, actor_opt_state,  
+    )  =  ddpg.prepare(init_key, config)
+    
+    (
+        qnet_params, target_qnet_params, qnet_opt_state, 
+        actor_params, target_actor_params, actor_opt_state, 
+        env_states, buffer_state
+    ) = warmup(ddpg.train_one_step, ddpg.rollout_and_push, ddpg.update_model,
+                train_key, gamma, tau, 
+                qnet, actor, opt, 
+                qnet_params, actor_params, target_qnet_params, target_actor_params,
+                qnet_opt_state, actor_opt_state, 
+                env, env_params, env_states, 
+                buffer, buffer_state,
+                num_steps_per_rollout)
+        
+    # training loop
+    print("start timing...")
+    start_time = time.time()
+
+    for iter in range(n_iters):
+        eps_cur = jnp.float32(0.5)
+        train_key, loss, *train_state = ddpg.train_one_step(
+            train_key, 
+            qnet, actor, opt, 
+            qnet_params, actor_params, target_qnet_params, target_actor_params,
+            qnet_opt_state, actor_opt_state, 
+            env, env_params, env_states, 
+            eps_cur, 
+            gamma, tau, 
+            True, True,
+            buffer, buffer_state,
+            num_steps_per_rollout,
+        )
+        (qnet_params, target_qnet_params, qnet_opt_state, 
+         actor_params, target_actor_params, actor_opt_state, 
+         env_states, buffer_state) = jax.block_until_ready(train_state)
+
+    qnet_params = jax.block_until_ready(qnet_params)
+    print(f"{Fore.BLUE}Average time {(time.time() - start_time)/n_iters*1e3:.2f}ms")
+
+
 
 if __name__ == "__main__":
     # Only jit inner function
     print("--------------- Only jit inner function ----------------")
-    run_name, qnet_params, actor_params = ddpg.run_training(config, warmup=warmup_inner, silent=True)
+    benchmark(config, warmup=warmup_inner)
     print(f"{Fore.GREEN}rollout_and_push compile times: {ddpg.rollout_and_push._cache_size()}")
     print(f"{Fore.GREEN}update_model compile times: {ddpg.update_model._cache_size()}")
         
@@ -109,5 +167,26 @@ if __name__ == "__main__":
                          "buffer", "num_steps",
                          "is_update_target_model", "is_update_model"],
         donate_argnames=["buffer_state"])
-    run_name, qnet_params, actor_params = ddpg.run_training(config, warmup=warmup_outer, silent=True)
+    benchmark(config, warmup=warmup_outer)
     print(f"{Fore.GREEN}train_one_step compile times: {ddpg.train_one_step._cache_size()}")
+
+
+    # # Only jit inner function
+    # print("--------------- Only jit inner function ----------------")
+    # run_name, qnet_params, actor_params = ddpg.run_training(config, warmup=warmup_inner, silent=True)
+    # print(f"{Fore.GREEN}rollout_and_push compile times: {ddpg.rollout_and_push._cache_size()}")
+    # print(f"{Fore.GREEN}update_model compile times: {ddpg.update_model._cache_size()}")
+        
+
+    # # Jit the outmost function train_one_step
+    # print("\n-------- Jit the outmost function train_one_step ---------")
+    # ddpg.train_one_step = jax.jit(
+    #     ddpg.train_one_step,
+    #     static_argnames=["qnet", "actor", "opt", "env", 
+    #                      "buffer", "num_steps",
+    #                      "is_update_target_model", "is_update_model"],
+    #     donate_argnames=["buffer_state"])
+    # run_name, qnet_params, actor_params = ddpg.run_training(config, warmup=warmup_outer, silent=True)
+    # print(f"{Fore.GREEN}train_one_step compile times: {ddpg.train_one_step._cache_size()}")
+
+

@@ -1,6 +1,4 @@
 #%%
-import sys
-sys.path.insert(0, 'vendor')
 import gymnax
 import jax
 from jax import random, numpy as jnp

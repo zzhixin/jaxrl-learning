@@ -4,8 +4,6 @@ import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 from matplotlib import animation
-import sys
-sys.path.insert(0, 'vendor')
 import gymnax
 from gymnax.visualize import vis_catch, vis_circle, vis_gym, vis_maze, vis_minatar
 

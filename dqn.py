@@ -4,8 +4,6 @@ warnings.filterwarnings("ignore")
 import os
 os.environ['JAX_PLATFORM_NAME'] = 'cpu' 
 
-import sys
-sys.path.insert(0, 'vendor')
 import gymnax
 import numpy as np
 import jax

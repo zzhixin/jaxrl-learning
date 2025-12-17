@@ -5,8 +5,6 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
-import sys
-sys.path.insert(0, 'vendor')
 import gymnax
 
 
