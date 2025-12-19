@@ -167,7 +167,7 @@ def update_model(sampled_experiences,
     updates, actor_opt_state = opt.update(grads, actor_opt_state)
     actor_params = optax.apply_updates(actor_params, updates)
 
-    return  loss, qnet_params, target_qnet_params, qnet_opt_state, actor_params, target_actor_params, actor_opt_state
+    return  loss, qnet_params, qnet_opt_state, actor_params, actor_opt_state
 
 
 # @partial(
@@ -201,7 +201,7 @@ def train_one_step(
     loss = jnp.array(0.0)
     if is_update_model:
         sampled_experiences = buffer.sample(sample_key, buffer_state)
-        loss, qnet_params, target_qnet_params, qnet_opt_state, actor_params, target_actor_params, actor_opt_state = \
+        loss, qnet_params, qnet_opt_state, actor_params, actor_opt_state = \
             update_model(sampled_experiences,
                         qnet, actor, opt, 
                         qnet_params, actor_params, target_qnet_params, target_actor_params,
@@ -266,6 +266,7 @@ def prepare(key, config):
         qnet_params, actor_params, target_qnet_params, target_actor_params,
         qnet_opt_state, actor_opt_state,  
     ) 
+
 
 def run_training(config, warmup=None, silent=False):
     run_name = config["env_name"] + "__ddpg__" + datetime.now().strftime('%Y%m%d_%H%M%S')
