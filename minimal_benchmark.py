@@ -100,7 +100,7 @@ def create_fake_transition(key):
         "rew": rew,
         }
 
-def train_one_step(key, model_params, buffer, buffer_state):
+def train_one_step_return_later(key, model_params, buffer, buffer_state):
     # collect data
     key, key_gen_data, key_sample = random.split(key, 3)
     keys = random.split(key_gen_data, add_batch_size)
@@ -120,11 +120,11 @@ def train_one_step(key, model_params, buffer, buffer_state):
     return model_params, buffer_state, key
 
 def train_one_step_return_early(key, model_params, buffer, buffer_state):
-    model_params, buffer_state, key = train_one_step(
+    model_params, buffer_state, key = train_one_step_return_later(
         key, model_params, buffer, buffer_state)
     return buffer_state, model_params, key
 
-def benchmark(train_fn):
+def benchmark_return_later():
     # prepare components
     buffer = make_replay_buffer(
             buffer_size=buffer_size, 
@@ -138,19 +138,22 @@ def benchmark(train_fn):
     key = random.key(seed)
     model_params = jnp.ones(obs_shape)
     
+    train_one_step_jit = jax.jit(train_one_step_return_later, 
+                                static_argnames=["buffer"], 
+                                donate_argnames=['buffer_state'])
     # warm up
     model_params, buffer_state, key = jax.block_until_ready(
-        train_fn(key, model_params, buffer, buffer_state))  
+        train_one_step_jit(key, model_params, buffer, buffer_state))  
 
     # training loop
     start_time = time.time()
     for iter in range(N_ITERS):
         model_params, buffer_state, key = jax.block_until_ready(
-            train_fn(key, model_params, buffer, buffer_state))  
+            train_one_step_jit(key, model_params, buffer, buffer_state))  
     ave_timedelta = (time.time() - start_time)/N_ITERS
     print(f"Average time: {humanize.precisedelta(ave_timedelta, minimum_unit='microseconds', format='%0.3f')}")
 
-def benchmark_return_early(train_fn):
+def benchmark_return_early():
     # prepare components
     buffer = make_replay_buffer(
             buffer_size=buffer_size, 
@@ -164,27 +167,25 @@ def benchmark_return_early(train_fn):
     key = random.key(seed)
     model_params = jnp.ones(obs_shape)
 
+    train_one_step_jit = jax.jit(train_one_step_return_early, 
+                                static_argnames=["buffer"], 
+                                donate_argnames=['buffer_state'])
+
     # warm up
     buffer_state, model_params, key = jax.block_until_ready(
-        train_fn(key, model_params, buffer, buffer_state))  
+        train_one_step_jit(key, model_params, buffer, buffer_state))  
 
     # training loop
     start_time = time.time()
     for iter in range(N_ITERS):
         buffer_state, model_params, key = jax.block_until_ready(
-            train_fn(key, model_params, buffer, buffer_state))  
+            train_one_step_jit(key, model_params, buffer, buffer_state))  
     ave_timedelta = (time.time() - start_time)/N_ITERS
     print(f"Average time: {humanize.precisedelta(ave_timedelta, minimum_unit='microseconds', format='%0.3f')}")
 
 
 if __name__ == "__main__":
     print("-------- return later ---------")
-    train_one_step_jit = jax.jit(train_one_step, 
-                                static_argnames=["buffer"], 
-                                donate_argnames=['buffer_state'])
-    benchmark(train_one_step_jit)
+    benchmark_return_later()
     print("\n-------- return early ---------")
-    train_one_step_return_early_jit = jax.jit(train_one_step_return_early, 
-                                static_argnames=["buffer"], 
-                                donate_argnames=['buffer_state'])
-    benchmark_return_early(train_one_step_return_early_jit)
+    benchmark_return_early()
