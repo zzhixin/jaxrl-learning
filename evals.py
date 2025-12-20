@@ -45,11 +45,11 @@ def evaluate(key,
 
 
 #%%
-@partial(jax.jit, static_argnames=("num_env", "num_steps", "env", "actor"))
+# @partial(jax.jit, static_argnames=("num_env", "num_steps", "env", "actor"))
 def evaluate_continuous_action(key, 
         actor: nn.Module, actor_params,
         env, env_params: gymnax.EnvParams,
-        num_env, num_steps,):
+        num_env, num_steps, global_steps):
     # checkify.check(isinstance(env, TerminationTruncationWrapper), "env should be TerminationTruncationWrapper")
     # checkify.check(env_params.max_steps_in_episode > num_steps, "max_steps_in_episode should be larger than num_steps")
 
@@ -69,8 +69,7 @@ def evaluate_continuous_action(key,
     episode_return_mean = (infos["returned_episode_returns"] * infos["returned_episode"]).sum() \
         / infos["returned_episode"].sum()
     
-    # jax.debug.print("{}", infos["returned_episode"][0,-2])
-    # jax.debug.print("{}", infos["returned_episode_returns"][0,-2])
+    jax.debug.print("global_steps: {},  episode_return_mean: {}", global_steps, episode_return_mean)
 
     return episode_return_mean
 

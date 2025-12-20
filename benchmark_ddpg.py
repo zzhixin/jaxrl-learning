@@ -26,7 +26,7 @@ buffer_size = int(1e6)
 sample_batch_size = 256 
 add_batch_size = 6 
 
-N_ITERS = 100
+N_ITERS = 10000
 
 
 class CriticNet(nn.Module):
@@ -106,11 +106,11 @@ def benchmark(train_fn):
 
     # training loop
     print("start timing...")
-    start_time = time.time()
+    start_time = time.thread_time()
     for iter in range(N_ITERS):
         key, model_params, buffer_state = jax.block_until_ready(
             train_fn(key, model, model_params, buffer, buffer_state))
-    ave_timedelta = (time.time() - start_time)/N_ITERS
+    ave_timedelta = (time.thread_time() - start_time)/N_ITERS
     print(f"{Fore.BLUE}Average time {ave_timedelta*1e3:.2f} ms")
 
 
