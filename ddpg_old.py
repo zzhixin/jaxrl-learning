@@ -32,7 +32,7 @@ import wandb
 from functools import partial
 
 from wrapper import LogWrapper, TerminationTruncationWrapper
-from replay_buffer import ReplayBuffer, ReplayBufferState
+from replay_buffer_old import ReplayBuffer, ReplayBufferState
 from rollout import batch_rollout
 from utils import eps_greedy_policy_continuous
 from evals import evaluate_continuous_action

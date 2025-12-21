@@ -14,7 +14,6 @@
 # > “This buffer participates in a complex graph; proving safe in-place reuse is hard.
 # > I’ll materialize a new value to be safe.”
 
-
 import warnings
 warnings.filterwarnings("ignore")
 import gymnax
@@ -32,7 +31,7 @@ import wandb
 from functools import partial
 
 from wrapper import LogWrapper, TerminationTruncationWrapper
-from replay_buffer import ReplayBuffer, ReplayBufferState
+from replay_buffer import ReplayBuffer, ReplayBufferState, make_replay_buffer
 from rollout import batch_rollout
 from utils import eps_greedy_policy_continuous
 from evals import evaluate_continuous_action
@@ -47,32 +46,43 @@ from monitor_recompile import monitor_recompiles
 # 直接定义为 Python 字典
 config = {
     "project_name": "jaxrl",
-    # "env_name": "MountainCarContinuous-v0",
-    "env_name": "Pendulum-v1",
-    "total_timesteps": 100_000,
-    "lr": 2.5e-4,
+    "env_name": "MountainCarContinuous-v0",
+    # "env_name": "Pendulum-v1",
+    "total_timesteps": 1_000_000,
+    "lr": 2.5e-4,   
     "gamma": 0.99,
     "tau": 0.001,
-    "target_update_freq": 1,
+    "target_update_interval": 1,
     # "tau": 1.,
-    # "target_update_freq": 500,
+    # "target_update_interval": 500,
     "epsilon_start": 1.0,
     "epsilon_end": 0.05,
     "exploration_fraction": 0.5,
     "num_env": 1,
-    "train_freq": 10,
+    "train_interval": 32,
     "train_batch_size": 128,
     "buffer_size": 1e6,
-    "learning_start": 1e4,
-    "test_freq": 10_000,       
-    "test_num_steps": 2000,
-    "test_num_env": 16,
-    "features": (128, 64),    # <--- 直接写成 Tuple，WandB 不会改动本地这个变量
+    "learning_start": 2e5,
+    "eval_interval": 8192,       
+    "eval_num_steps": 2000,
+    "eval_num_env": 16,
+    "features": (128, 64),
     "seed": 0,
-    "log_freq": 1000,          # <--- 控制 WandB 写入频率，避免拖慢速度
+    "log_freq": 1000,
     "wandb": False,
     "ckpt_path": '/home/zhixin/jaxrl-learning/ckpts/'
 }
+
+
+def check_config(config):
+    assert config["train_interval"] >= config["num_env"]
+    assert config["train_interval"] % config["num_env"] == 0
+    assert config["total_timesteps"] > config["learning_start"]
+    assert config["eval_interval"] > config["train_interval"]
+    assert config["eval_interval"] % config["train_interval"] == 0
+    _, env_params = gymnax.make(config["env_name"])
+    assert config["eval_num_steps"] > env_params.max_steps_in_episode
+
 
 #  Q net
 class QNet(nn.Module):
@@ -113,10 +123,11 @@ def rollout_and_push(key,
     policy = partial(eps_greedy_policy_continuous,
                     env=env, env_params=env_params, actor=actor, actor_params=actor_params, eps=eps_cur)
 
-    env_state, experiences = batch_rollout(rollout_keys, env, env_state, env_params, policy, num_steps)
-    experiences = experiences[:-1]
-    flat_experience = jax.tree.map(lambda x: jnp.reshape(x, shape=(-1, *x.shape[2:])), experiences)
-    buffer_state = buffer.push(buffer_state, flat_experience)
+    env_state, exprs = batch_rollout(rollout_keys, env, env_state, env_params, policy, num_steps)
+    exprs = exprs[:-1]   # exclude the info
+    exprs_dict = {'obs': exprs[0], 'action': exprs[1], 'rew': exprs[2], 'next_obs': exprs[3], 'ter': exprs[4], 'tru': exprs[5]}
+    flat_exprs_dict = jax.tree.map(lambda x: jnp.reshape(x, shape=(-1, *x.shape[2:])), exprs_dict)
+    buffer_state = buffer.add(buffer_state, flat_exprs_dict)
 
     return  env_state, buffer_state
 
@@ -131,8 +142,9 @@ def update_model(gamma: float, buffer: ReplayBuffer,
     ) = update_state
 
     def batch_critic_loss_fn(qnet_params, target_actor_params, experiences):
-        def critic_loss_fn(experience):
-            obs, action, reward, next_obs, termination, truncation = experience
+        def critic_loss_fn(expr):
+            obs, action, reward, next_obs, termination = \
+                expr['obs'], expr['action'], expr['rew'], expr['next_obs'], expr['ter']
             next_max_action = actor.apply(target_actor_params, next_obs)
             q_next = qnet.apply(target_qnet_params, jnp.concat((next_obs, next_max_action), axis=-1))
             target = reward + gamma * q_next * (1 - termination)
@@ -143,8 +155,9 @@ def update_model(gamma: float, buffer: ReplayBuffer,
         return jax.vmap(critic_loss_fn)(experiences).mean()
     
     def batch_actor_loss_fn(actor_params, qnet_params, experiences):
-        def actor_loss_fn(experience):
-            obs, *_ = experience
+        def actor_loss_fn(expr):
+            # obs, *_ = experience
+            obs = expr['obs']
             action = actor.apply(actor_params, obs)
             q_pred = qnet.apply(qnet_params, jnp.concat((obs, action), axis=-1))
             return -q_pred
@@ -214,20 +227,19 @@ def train_one_step(
         key
     ) = train_state
     
-    rollout_batch_size = config["train_freq"]
-    num_rollout_steps = config["train_freq"] // config["num_env"]
-    num_train_steps = config["total_timesteps"] // rollout_batch_size
+    rollout_batch_size = config["train_interval"]
+    rollout_num_steps = rollout_batch_size // config["num_env"]
+    num_updates = config["total_timesteps"] // rollout_batch_size
     learning_start = config["learning_start"]
-    target_update_freq = config["target_update_freq"]
+    target_update_interval = config["target_update_interval"]
     gamma = config["gamma"]
     tau = config["tau"]
-    log_freq = config["log_freq"]
 
-    global_steps = config["train_freq"] * i_train_step
+    global_steps = rollout_batch_size * i_train_step
     
     # epsilon Schedule
     def get_epsilon(i_step):
-        steps_fraction = i_step / (num_train_steps * config["exploration_fraction"])
+        steps_fraction = i_step / (num_updates * config["exploration_fraction"])
         eps = jnp.interp(steps_fraction, 
                          jnp.array([0., 1.]), 
                          jnp.array([config["epsilon_start"], config["epsilon_end"]]))
@@ -236,7 +248,7 @@ def train_one_step(
     eps_cur = get_epsilon(i_train_step)
         
     is_update_model = global_steps > learning_start
-    is_update_target_model = is_update_model & (i_train_step % target_update_freq == 0)
+    is_update_target_model = is_update_model & (i_train_step % target_update_interval == 0)
     
     key, rollout_key, test_key = jax.random.split(key, 3)
 
@@ -245,7 +257,7 @@ def train_one_step(
                      env, env_params, env_state, 
                      eps_cur,
                      buffer, buffer_state,
-                     num_rollout_steps)
+                     rollout_num_steps)
 
     update_model, no_update_model = make_update_model(gamma, buffer, qnet, actor, opt)
 
@@ -254,7 +266,9 @@ def train_one_step(
         qnet_opt_state, actor_opt_state, key
     )
     update_state, loss = \
-        jax.lax.cond(is_update_model, update_model, no_update_model, 
+        jax.lax.cond(is_update_model, 
+                     update_model, 
+                     lambda *_: (update_state, {'critic_loss': jnp.float32(0.), 'actor_loss': jnp.float32(0.)}), 
                      update_state, buffer_state, target_qnet_params, target_actor_params)
     (
         qnet_params, actor_params, 
@@ -268,14 +282,17 @@ def train_one_step(
                                        actor_params, target_actor_params)
 
     # Logging
-    # assert config["test_num_steps"] > env_params.max_steps_in_episode
+    # assert config["eval_num_steps"] > env_params.max_steps_in_episode
+    global_steps = (i_train_step + 1) * rollout_batch_size
     eval, no_eval = make_eval(actor, test_env, 
-                              config["test_num_env"], config["test_num_steps"], global_steps)
-    eval_eps_ret_mean = jax.lax.cond(global_steps % config["test_freq"] == 0,
-                                     eval, no_eval,
-                                     test_key, actor_params, test_env_params)
+                              config["eval_num_env"], config["eval_num_steps"], 
+                              global_steps)
+    eval_eps_ret_mean = jax.lax.cond(
+        global_steps % (config["eval_interval"]) == 0,
+        eval, no_eval,
+        test_key, actor_params, test_env_params)
     
-    # if global_steps % config["test_freq"] == 0:
+    # if global_steps % config["eval_interval"] == 0:
     #     if config["wandb"]:
     #         wandb.log({
     #             "train/loss": loss,
@@ -320,14 +337,21 @@ def prepare(key, config):
     dummy_act_keys = random.split(random.key(0), config["num_env"])          
     dummy_actions = jax.vmap(env.action_space(env_params).sample)(dummy_act_keys)
 
-    rollout_batch_size = config["num_env"] * config["train_freq"]
-    buffer = ReplayBuffer.create(
+    rollout_batch_size = config["train_interval"]
+    buffer = make_replay_buffer(
         buffer_size=config["buffer_size"], 
         rollout_batch=rollout_batch_size, 
         sample_batch=config["train_batch_size"],
-        discrete_action=False
     )
-    buffer_state = buffer.init(obses.shape[1:], dummy_actions.shape[1:])
+    dummy_transitions = {
+        'obs': jnp.zeros((rollout_batch_size,) + env.observation_space(env_params).shape), 
+        'action': jnp.zeros((rollout_batch_size,) + env.action_space(env_params).shape), 
+        'rew': jnp.zeros((rollout_batch_size,)),
+        'next_obs': jnp.zeros((rollout_batch_size,) + env.observation_space(env_params).shape), 
+        'ter':  jnp.zeros((rollout_batch_size,)),
+        'tru': jnp.zeros((rollout_batch_size,))
+    }
+    buffer_state = buffer.init(dummy_transitions)
 
     qnet = QNet(features=config["features"])
     qnet_params = qnet.init(qnet_init_key, jnp.concat((obses, dummy_actions), axis=-1))
@@ -371,7 +395,7 @@ def run_training(config, silent=False):
         )
     
     # extrac configurations
-    rollout_batch_size = config["train_freq"]
+    rollout_batch_size = config["train_interval"]
     num_train_steps = config["total_timesteps"] // rollout_batch_size
 
     if not silent:
@@ -402,8 +426,8 @@ def run_training(config, silent=False):
     # training loop
     print("start training...")
     start_time = time.time()
-    # train_state, losses = jax.lax.scan(train_one_step, train_state, jnp.arange(num_train_steps))
-    train_state, eval_eps_ret_means = jax.jit(lambda: jax.lax.scan(train_one_step, train_state, jnp.arange(num_train_steps)))()
+    train_state, losses = jax.lax.scan(train_one_step, train_state, jnp.arange(num_train_steps))
+    # train_state, eval_eps_ret_means = jax.jit(lambda: jax.lax.scan(train_one_step, train_state, jnp.arange(num_train_steps)))()
     train_state = jax.block_until_ready(train_state)
     print(f"{Fore.BLUE}Training finished in {time.time() - start_time:.2f}s")
 
@@ -420,7 +444,7 @@ def run_training(config, silent=False):
 
 
 if __name__ == "__main__":
-    
+    check_config(config)
     run_name, qnet_params, actor_params = run_training(config)
 
     # # Save latest model
@@ -531,4 +555,3 @@ if __name__ == "__main__":
     # # print("generating gif...")
     # # vis = Visualizer(env, env_params, state_seq, cum_rewards)
     # # vis.animate(f"gif/anim.gif")
-

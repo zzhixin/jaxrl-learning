@@ -9,7 +9,7 @@ from typing import Sequence
 import optax
 import pprint
 from wrapper import LogWrapper, TerminationTruncationWrapper
-from replay_buffer import ReplayBuffer, ReplayBufferState, Experience
+from replay_buffer_old import ReplayBuffer, ReplayBufferState, Experience
 from utils import eps_greedy_policy, eps_greedy_policy_continuous
 from rollout import rollout, batch_rollout
 from functools import partial
