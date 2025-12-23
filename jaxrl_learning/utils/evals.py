@@ -2,18 +2,16 @@
 import gymnax
 import jax
 from jax import random, numpy as jnp
-import flax
 from flax import struct, linen as nn
 import numpy as np
 from typing import Sequence
-import optax
-import pprint
-from wrapper import LogWrapper, TerminationTruncationWrapper
-from replay_buffer_old import ReplayBuffer, ReplayBufferState, Experience
-from utils import eps_greedy_policy, eps_greedy_policy_continuous
-from rollout import rollout, batch_rollout
+from jaxrl_learning.utils.wrapper import LogWrapper, TerminationTruncationWrapper
+from jaxrl_learning.utils.replay_buffer_old import ReplayBuffer, ReplayBufferState, Experience
+from jaxrl_learning.utils.utils import eps_greedy_policy, eps_greedy_policy_continuous
+from jaxrl_learning.utils.rollout import rollout, batch_rollout
 from functools import partial
 from jax.experimental import checkify
+from jaxrl_learning.utils.utils import save_model
 
 
 #%%
@@ -47,7 +45,7 @@ def evaluate(key,
 #%%
 # @partial(jax.jit, static_argnames=("num_env", "num_steps", "env", "actor"))
 def evaluate_continuous_action(key, 
-        actor: nn.Module, actor_params,
+        policy,
         env, env_params: gymnax.EnvParams,
         num_env, num_steps, global_steps):
     # checkify.check(isinstance(env, TerminationTruncationWrapper), "env should be TerminationTruncationWrapper")
@@ -57,20 +55,30 @@ def evaluate_continuous_action(key,
     reset_keys = random.split(reset_key, num_env)
     rollout_keys = random.split(rollout_key, num_env)
     obses, env_states = jax.vmap(env.reset, in_axes=(0, None))(reset_keys, env_params)
-    policy = partial(eps_greedy_policy_continuous,
-                        env=env, 
-                        env_params=env_params, 
-                        actor=actor, 
-                        actor_params=actor_params,
-                        eps=0.)
     
     env_states, sampled_experiences = batch_rollout(rollout_keys, env, env_states, env_params, policy, num_steps)
     *_, infos = sampled_experiences
     episode_return_mean = (infos["returned_episode_returns"] * infos["returned_episode"]).sum() \
         / infos["returned_episode"].sum()
     
-    jax.debug.print("global_steps: {},  episode_return_mean: {}", global_steps, episode_return_mean)
+    jax.debug.print("global_steps: {},  episode_return_mean: {:.2f}", global_steps, episode_return_mean)
 
     return episode_return_mean
 
 
+def make_eval_and_logging_continuous(
+        config, run_name, best_eps_ret,
+        model_params_to_save,
+        policy, env, env_params, num_env, num_steps, 
+        global_steps):
+    def eval_and_logging(key):
+        nonlocal best_eps_ret
+        eps_ret_mean = evaluate_continuous_action(key, policy, env, env_params, num_env, num_steps, global_steps)
+
+        # save best model so far
+        save_model_fn = lambda model_params: save_model(config, model_params, run_name, "best_model") 
+        jax.debug.callback(save_model_fn, model_params_to_save)
+        best_eps_ret = jnp.maximum(best_eps_ret, eps_ret_mean)
+        return eps_ret_mean, best_eps_ret
+
+    return eval_and_logging

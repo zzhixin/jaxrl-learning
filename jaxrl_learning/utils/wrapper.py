@@ -1,11 +1,9 @@
 #%%
 import jax
 from jax import numpy as jnp, random
-import gymnax
 from gymnax.wrappers import LogWrapper
 from gymnax.wrappers.purerl import GymnaxWrapper, LogEnvState
 from gymnax.environments import environment
-import pprint
 from jax.experimental import checkify
 from functools import partial
 
