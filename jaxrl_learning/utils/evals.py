@@ -76,8 +76,12 @@ def make_eval_and_logging_continuous(
         eps_ret_mean = evaluate_continuous_action(key, policy, env, env_params, num_env, num_steps, global_steps)
 
         # save best model so far
-        save_model_fn = lambda model_params: save_model(config, model_params, run_name, "best_model") 
-        jax.debug.callback(save_model_fn, model_params_to_save)
+        def save_model_fn():
+            save_model_callback = lambda model_params: save_model(config, model_params, run_name, "best_model") 
+            jax.debug.callback(save_model_callback, model_params_to_save)
+        jax.lax.cond(eps_ret_mean > best_eps_ret,
+                     save_model_fn,
+                     lambda: None)
         best_eps_ret = jnp.maximum(best_eps_ret, eps_ret_mean)
         return eps_ret_mean, best_eps_ret
 

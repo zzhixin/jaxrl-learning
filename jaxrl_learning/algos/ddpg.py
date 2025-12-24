@@ -38,8 +38,9 @@ config = {
     "project_name": "jaxrl",
     # "env_name": "MountainCarContinuous-v0",
     "env_name": "Pendulum-v1",
-    "total_timesteps": 100_000,
-    "lr": 5e-3,
+    "total_timesteps": 200_000,
+    "lr_critic": 2e-3,
+    "lr_actor": 5e-3,
     "gamma": 0.99,
     "tau": 0.001,
     "target_update_interval": 1,
@@ -160,12 +161,13 @@ def collect(key,
 
 def update_model(gamma: float, buffer: ReplayBuffer,
                  qnet: nn.Module, actor: nn.Module, opt: optax.GradientTransformation,
-                 update_state, buffer_state, target_qnet_params, target_actor_params,
+                 update_state, buffer_state, target_model_params,
                  ):
-    (
-        qnet_params, actor_params,
-        qnet_opt_state, actor_opt_state, key
-    ) = update_state
+    (model_params, opt_state, key) = update_state
+    qnet_params = model_params["qnet_params"]
+    actor_params = model_params["actor_params"]
+    target_qnet_params = target_model_params["qnet_params"]
+    target_actor_params = target_model_params["actor_params"]
 
     def batch_critic_loss_fn(qnet_params, target_actor_params, experiences):
         def critic_loss_fn(expr):
@@ -193,29 +195,24 @@ def update_model(gamma: float, buffer: ReplayBuffer,
     key, sample_key = random.split(key)
     sampled_experiences = buffer.sample(sample_key, buffer_state)
 
-    # update qnet
-    critic_loss, grads = jax.value_and_grad(batch_critic_loss_fn)(qnet_params, target_actor_params, sampled_experiences)
-    updates, qnet_opt_state = opt.update(grads, qnet_opt_state)
-    qnet_params = optax.apply_updates(qnet_params, updates)
+    # update model
+    critic_loss, critic_grads = jax.value_and_grad(batch_critic_loss_fn)(qnet_params, target_actor_params, sampled_experiences)
+    actor_loss, actor_grads = jax.value_and_grad(batch_actor_loss_fn)(actor_params, qnet_params, sampled_experiences)
+    model_grads = {"qnet_params": critic_grads, "actor_params": actor_grads}
+    updates, opt_state = opt.update(model_grads, opt_state)
+    model_params = optax.apply_updates(model_params, updates)
 
-    # update actor
-    actor_loss, grads = jax.value_and_grad(batch_actor_loss_fn)(actor_params, qnet_params, sampled_experiences)
-    updates, actor_opt_state = opt.update(grads, actor_opt_state)
-    actor_params = optax.apply_updates(actor_params, updates)
+    update_state = (model_params, opt_state, key)
 
-    update_state = (
-        qnet_params, actor_params,
-        qnet_opt_state, actor_opt_state, key
-    )
     return  update_state, {'critic_loss': critic_loss, 'actor_loss': actor_loss}
 
 
 def make_update_model(gamma: float, buffer: ReplayBuffer,
                       qnet: nn.Module, actor: nn.Module, opt: optax.GradientTransformation):
-    def update_model_(update_state, buffer_state, target_qnet_params, target_actor_params):
+    def update_model_(update_state, buffer_state, target_model_params):
         return update_model(gamma, buffer,
                  qnet, actor, opt,
-                 update_state, buffer_state, target_qnet_params, target_actor_params, )
+                 update_state, buffer_state, target_model_params, )
 
     return update_model_ 
 
@@ -228,11 +225,8 @@ def train_one_step(
         i_train_step: int):
 
     (
-        env_params, env_state, test_env_params,
-        buffer_state,
-        qnet_params, actor_params,
-        target_qnet_params, target_actor_params,
-        qnet_opt_state, actor_opt_state,
+        env_params, env_states, test_env_params, buffer_state,
+        model_params, target_model_params, opt_state,
         eval_eps_ret_mean, best_eps_ret,
         key
     ) = train_state
@@ -263,46 +257,36 @@ def train_one_step(
     key, rollout_key, test_key = jax.random.split(key, 3)
 
     # collect data
-    env_state, buffer_state = collect(rollout_key,
+    actor_params = model_params["actor_params"]
+    env_states, buffer_state = collect(rollout_key,
                      actor, actor_params,
-                     env, env_params, env_state,
+                     env, env_params, env_states,
                      eps_cur,
                      buffer, buffer_state,
                      rollout_num_steps)
 
     # update model
     update_model = make_update_model(gamma, buffer, qnet, actor, opt)
-    update_state = (
-        qnet_params, actor_params,
-        qnet_opt_state, actor_opt_state, key
-    )
+    update_state = (model_params, opt_state, key)
     update_state, loss = \
         jax.lax.cond(is_update_model,
                      update_model,
                      lambda *_: (update_state, {'critic_loss': jnp.float32(0.), 'actor_loss': jnp.float32(0.)}),
-                     update_state, buffer_state, target_qnet_params, target_actor_params)
-    (
-        qnet_params, actor_params,
-        qnet_opt_state, actor_opt_state, key
-    ) = update_state
+                     update_state, buffer_state, target_model_params)
+    (model_params, opt_state, key) = update_state 
 
     # update target model
     effective_tau = jnp.where(is_update_target_model, tau, 0.0)
-    target_qnet_params = jax.tree.map(lambda q, t: q * effective_tau + t * (1 - effective_tau),
-                                      qnet_params, target_qnet_params)
-    target_actor_params = jax.tree.map(lambda q, t: q * effective_tau + t * (1 - effective_tau),
-                                       actor_params, target_actor_params)
+    target_model_params = jax.tree.map(lambda q, t: q * effective_tau + t * (1 - effective_tau),
+                                       model_params, target_model_params)
 
     # evaluation
     global_steps = (i_train_step + 1) * rollout_batch_size
     eval_policy = make_policy(config["use_eps_gready"], 
                               env, env_params, 
-                              actor, actor_params, eps_cur, 
-                              config["exploration_noise"])
-    model_params = {
-        "qnet_params": qnet_params,
-        "actor_params": actor_params
-    }
+                              actor, actor_params, 
+                              0., 0.)
+                            #   eps_cur, config["exploration_noise"])
     eval_and_logging = make_eval_and_logging_continuous(
         config, run_name, best_eps_ret, model_params, eval_policy, 
         test_env, test_env_params, 
@@ -316,11 +300,8 @@ def train_one_step(
 
 
     train_state = (
-        env_params, env_state, test_env_params,
-        buffer_state,
-        qnet_params, actor_params,
-        target_qnet_params, target_actor_params,
-        qnet_opt_state, actor_opt_state,
+        env_params, env_states, test_env_params, buffer_state,
+        model_params, target_model_params, opt_state,
         eval_eps_ret_mean, best_eps_ret,
         key
     )
@@ -378,20 +359,20 @@ def prepare(key, config):
     actor_params = actor.init(actor_init_key, obses)
     target_actor_params = actor_params.copy()
 
-    opt = optax.adam(learning_rate=config["lr"])
-    qnet_opt_state = opt.init(qnet_params)
-    actor_opt_state = opt.init(actor_params)
+    model_params = {"qnet_params": qnet_params, "actor_params": actor_params}
+    target_model_params = {"qnet_params": target_qnet_params, "actor_params": target_actor_params}
+
+    opt = optax.partition({"qnet_params": optax.adam(config["lr_critic"]), "actor_params": optax.adam(config["lr_actor"])}, 
+                          {"qnet_params": "qnet_params", "actor_params": "actor_params"})
+    opt_state = opt.init(model_params)
 
     test_env, test_env_params = gymnax.make(config["env_name"])
     test_env = TerminationTruncationWrapper(LogWrapper(test_env))
 
     eval_eps_ret_mean = jnp.nan; best_eps_ret = -jnp.inf
     train_state = (
-        env_params, env_states, test_env_params,
-        buffer_state,
-        qnet_params, actor_params,
-        target_qnet_params, target_actor_params,
-        qnet_opt_state, actor_opt_state,
+        env_params, env_states, test_env_params, buffer_state,
+        model_params, target_model_params, opt_state,
         eval_eps_ret_mean, best_eps_ret,
         key
     )
@@ -431,19 +412,16 @@ def run_training(config, silent=False):
 
     # parse train_state
     (
-        env_params, env_states, test_env_params,
-        buffer_state,
-        qnet_params, actor_params,
-        target_qnet_params, target_actor_params,
-        qnet_opt_state, actor_opt_state,
+        env_params, env_states, test_env_params, buffer_state,
+        model_params, target_model_params, opt_state,
         eval_eps_ret_mean, best_eps_ret,
         key
     ) = train_state
 
-    return run_name, qnet_params, actor_params
+    return run_name, model_params
 
 
 if __name__ == "__main__":
     check_config(config)
-    run_name, qnet_params, actor_params = run_training(config)
+    run_name, model_params= run_training(config)
 
