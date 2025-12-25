@@ -14,6 +14,9 @@ jax.config.update("jax_platform_name", "cpu")
 # jax.disable_jit(disable=True)
 from jax import random, numpy as jnp
 from flax import linen as nn
+from flax.training.train_state import TrainState
+from flax.core.frozen_dict import FrozenDict
+from flax import struct
 import optax
 import time
 import wandb
@@ -105,20 +108,24 @@ class ActorNet(nn.Module):
         return x
 
 
+class CustomTrainState(TrainState):
+    target_params: FrozenDict = struct.field(pytree_node=True)
+
+
 def make_policy(use_eps_greedy, 
                 env, env_params, 
-                actor, actor_params, 
+                actor_train_state: CustomTrainState,
                 eps_cur=None,
                 std=None):
     def noisy_policy(key, obs):
-        mean = actor.apply(actor_params, obs)
+        mean = actor_train_state.apply_fn(actor_train_state.params, obs)
         lo = env.action_space(env_params).low
         hi = env.action_space(env_params).high
         scale = hi - lo
         noise = random.truncated_normal(key, lo, hi, mean.shape)*std*scale
         return mean + noise
     if std == 0.:
-        sub_policy = lambda key, obs: actor.apply(actor_params, obs)
+        sub_policy = lambda key, obs: actor_train_state.apply_fn(actor_train_state.params, obs)
     else:
         sub_policy = noisy_policy
 
@@ -138,7 +145,7 @@ def make_policy(use_eps_greedy,
 
 
 def collect(key,
-            actor: nn.Module, actor_params,
+            actor_train_state,
             env, env_params: gymnax.EnvParams, env_state: gymnax.EnvState,
             eps_cur: float,
             buffer: ReplayBuffer, buffer_state: ReplayBufferState,
@@ -147,7 +154,7 @@ def collect(key,
 
     policy = make_policy(config["use_eps_gready"], 
                          env, env_params, 
-                         actor, actor_params, eps_cur, 
+                         actor_train_state, eps_cur, 
                          config["exploration_noise"])
 
     env_state, exprs = batch_rollout(rollout_keys, env, env_state, env_params, policy, num_steps)
@@ -159,35 +166,34 @@ def collect(key,
     return  env_state, buffer_state
 
 
-def update_model(gamma: float, buffer: ReplayBuffer,
-                 qnet: nn.Module, actor: nn.Module, opt: optax.GradientTransformation,
-                 update_state, buffer_state, target_model_params,
+def update_model(gamma: float, buffer: ReplayBuffer, buffer_state, 
+                 actor_train_state: CustomTrainState, critic_train_state: CustomTrainState, 
+                 key: random.PRNGKey
                  ):
-    (model_params, opt_state, key) = update_state
-    qnet_params = model_params["qnet_params"]
-    actor_params = model_params["actor_params"]
-    target_qnet_params = target_model_params["qnet_params"]
-    target_actor_params = target_model_params["actor_params"]
+    critic_params = critic_train_state.params
+    actor_params = actor_train_state.params
+    target_critic_params = critic_train_state.target_params
+    target_actor_params = actor_train_state.target_params
 
-    def batch_critic_loss_fn(qnet_params, target_actor_params, experiences):
+    def batch_critic_loss_fn(critc_params, experiences):
         def critic_loss_fn(expr):
             obs, action, reward, next_obs, termination = \
                 expr['obs'], expr['action'], expr['rew'], expr['next_obs'], expr['ter']
-            next_max_action = actor.apply(target_actor_params, next_obs)
-            q_next = qnet.apply(target_qnet_params, jnp.concat((next_obs, next_max_action), axis=-1))
+            next_max_action = actor_train_state.apply_fn(target_actor_params, next_obs)
+            q_next = critic_train_state.apply_fn(target_critic_params, jnp.concat((next_obs, next_max_action), axis=-1))
             target = reward + gamma * q_next * (1 - termination)
             target = jax.lax.stop_gradient(target)
-            q_pred = qnet.apply(qnet_params, jnp.concat((obs, action), axis=-1))
+            q_pred = critic_train_state.apply_fn(critc_params, jnp.concat((obs, action), axis=-1))
             return (q_pred - target)**2
 
         return jax.vmap(critic_loss_fn)(experiences).mean()
 
-    def batch_actor_loss_fn(actor_params, qnet_params, experiences):
+    def batch_actor_loss_fn(actor_params, experiences):
         def actor_loss_fn(expr):
             # obs, *_ = experience
             obs = expr['obs']
-            action = actor.apply(actor_params, obs)
-            q_pred = qnet.apply(qnet_params, jnp.concat((obs, action), axis=-1))
+            action = actor_train_state.apply_fn(actor_params, obs)
+            q_pred = critic_train_state.apply_fn(critic_params, jnp.concat((obs, action), axis=-1))
             return -q_pred
 
         return jax.vmap(actor_loss_fn)(experiences).mean()
@@ -196,37 +202,29 @@ def update_model(gamma: float, buffer: ReplayBuffer,
     sampled_experiences = buffer.sample(sample_key, buffer_state)
 
     # update model
-    critic_loss, critic_grads = jax.value_and_grad(batch_critic_loss_fn)(qnet_params, target_actor_params, sampled_experiences)
-    actor_loss, actor_grads = jax.value_and_grad(batch_actor_loss_fn)(actor_params, qnet_params, sampled_experiences)
-    model_grads = {"qnet_params": critic_grads, "actor_params": actor_grads}
-    updates, opt_state = opt.update(model_grads, opt_state)
-    model_params = optax.apply_updates(model_params, updates)
+    critic_loss, critic_grads = jax.value_and_grad(batch_critic_loss_fn)(critic_params, sampled_experiences)
+    actor_loss, actor_grads = jax.value_and_grad(batch_actor_loss_fn)(actor_params, sampled_experiences)
+    actor_train_state = actor_train_state.apply_gradients(grads=actor_grads)
+    critic_train_state = critic_train_state.apply_gradients(grads=critic_grads)
 
-    update_state = (model_params, opt_state, key)
-
-    return  update_state, {'critic_loss': critic_loss, 'actor_loss': actor_loss}
+    return  actor_train_state, critic_train_state, key, {'critic_loss': critic_loss, 'actor_loss': actor_loss}
 
 
-def make_update_model(gamma: float, buffer: ReplayBuffer,
-                      qnet: nn.Module, actor: nn.Module, opt: optax.GradientTransformation):
-    def update_model_(update_state, buffer_state, target_model_params):
-        return update_model(gamma, buffer,
-                 qnet, actor, opt,
-                 update_state, buffer_state, target_model_params, )
-
+def make_update_model(gamma: float, buffer: ReplayBuffer, buffer_state: ReplayBufferState):
+    def update_model_(actor_train_state, critic_train_state, key):
+        return update_model(gamma, buffer, buffer_state,
+                            actor_train_state, critic_train_state, key)
     return update_model_ 
 
 
 def train_one_step(
         config, run_name,
         env, test_env, buffer: ReplayBuffer,
-        qnet: nn.Module, actor: nn.Module, opt: optax.GradientTransformation,
         train_state,
         i_train_step: int):
-
     (
         env_params, env_states, test_env_params, buffer_state,
-        model_params, target_model_params, opt_state,
+        actor_train_state, critic_train_state,
         eval_eps_ret_mean, best_eps_ret,
         key
     ) = train_state
@@ -254,41 +252,49 @@ def train_one_step(
     is_update_model = global_steps > learning_start
     is_update_target_model = is_update_model & (i_train_step % target_update_interval == 0)
 
-    key, rollout_key, test_key = jax.random.split(key, 3)
+    key, rollout_key, sample_key, test_key = jax.random.split(key, 4)
 
     # collect data
-    actor_params = model_params["actor_params"]
     env_states, buffer_state = collect(rollout_key,
-                     actor, actor_params,
-                     env, env_params, env_states,
-                     eps_cur,
-                     buffer, buffer_state,
-                     rollout_num_steps)
+                                       actor_train_state,
+                                       env, env_params, env_states,
+                                       eps_cur,
+                                       buffer, buffer_state,
+                                       rollout_num_steps)
 
     # update model
-    update_model = make_update_model(gamma, buffer, qnet, actor, opt)
-    update_state = (model_params, opt_state, key)
-    update_state, loss = \
+    update_model = make_update_model(gamma, buffer, buffer_state)
+    actor_train_state, critic_train_state, key, loss = \
         jax.lax.cond(is_update_model,
                      update_model,
-                     lambda *_: (update_state, {'critic_loss': jnp.float32(0.), 'actor_loss': jnp.float32(0.)}),
-                     update_state, buffer_state, target_model_params)
-    (model_params, opt_state, key) = update_state 
+                     lambda *_: (actor_train_state, critic_train_state, sample_key, 
+                                 {'critic_loss': jnp.float32(0.), 'actor_loss': jnp.float32(0.)}),
+                     actor_train_state, critic_train_state, sample_key)
 
     # update target model
     effective_tau = jnp.where(is_update_target_model, tau, 0.0)
-    target_model_params = jax.tree.map(lambda q, t: q * effective_tau + t * (1 - effective_tau),
-                                       model_params, target_model_params)
+    actor_train_state = actor_train_state.replace(
+        target_params = jax.tree.map(lambda q, t: q * effective_tau + t * (1 - effective_tau),
+                                     actor_train_state.params, actor_train_state.target_params)
+    )
+    critic_train_state = critic_train_state.replace(
+        target_params = jax.tree.map(lambda q, t: q * effective_tau + t * (1 - effective_tau),
+                                     critic_train_state.params, critic_train_state.target_params)
+    )
 
     # evaluation
     global_steps = (i_train_step + 1) * rollout_batch_size
     eval_policy = make_policy(config["use_eps_gready"], 
                               env, env_params, 
-                              actor, actor_params, 
+                              actor_train_state,
                               0., 0.)
                             #   eps_cur, config["exploration_noise"])
+    model_parms_to_save = {
+        "actor": actor_train_state.params,
+        "critic": critic_train_state.params,
+    }
     eval_and_logging = make_eval_and_logging_continuous(
-        config, run_name, best_eps_ret, model_params, eval_policy, 
+        config, run_name, best_eps_ret, model_parms_to_save, eval_policy, 
         test_env, test_env_params, 
         config["eval_num_env"], config["eval_num_steps"], global_steps
     )
@@ -298,10 +304,9 @@ def train_one_step(
         lambda *_: (eval_eps_ret_mean, best_eps_ret),
         test_key)
 
-
     train_state = (
         env_params, env_states, test_env_params, buffer_state,
-        model_params, target_model_params, opt_state,
+        actor_train_state, critic_train_state,
         eval_eps_ret_mean, best_eps_ret,
         key
     )
@@ -309,9 +314,9 @@ def train_one_step(
     return  train_state, eval_eps_ret_mean
 
 
-def make_train_one_step(config, run_name, env, test_env, buffer, qnet, actor, opt):
+def make_train_one_step(config, run_name, env, test_env, buffer):
     def train_one_step_(train_state, i_update_step):
-        return train_one_step(config, run_name, env, test_env, buffer, qnet, actor, opt,
+        return train_one_step(config, run_name, env, test_env, buffer,
                               train_state, i_update_step)
     return train_one_step_
 
@@ -346,9 +351,15 @@ def prepare(key, config):
     }
     buffer_state = buffer.init(dummy_transitions)
 
-    qnet = QNet(features=config["features"])
-    qnet_params = qnet.init(qnet_init_key, jnp.concat((obses, dummy_actions), axis=-1))
-    target_qnet_params = qnet_params.copy()
+    critic = QNet(features=config["features"])
+    critic_params = critic.init(qnet_init_key, jnp.concat((obses, dummy_actions), axis=-1))
+    critic_tx = optax.adam(config["lr_critic"])
+    critic_train_state = CustomTrainState.create(
+        apply_fn=critic.apply,
+        params=critic_params,
+        target_params=critic_params.copy(),
+        tx=critic_tx,
+    )
 
     action_lo = env.action_space(env_params).low
     action_hi = env.action_space(env_params).high
@@ -357,14 +368,13 @@ def prepare(key, config):
                     action_scale=(action_hi - action_lo)/2,
                     action_bias=(action_lo + action_hi)/2)
     actor_params = actor.init(actor_init_key, obses)
-    target_actor_params = actor_params.copy()
-
-    model_params = {"qnet_params": qnet_params, "actor_params": actor_params}
-    target_model_params = {"qnet_params": target_qnet_params, "actor_params": target_actor_params}
-
-    opt = optax.partition({"qnet_params": optax.adam(config["lr_critic"]), "actor_params": optax.adam(config["lr_actor"])}, 
-                          {"qnet_params": "qnet_params", "actor_params": "actor_params"})
-    opt_state = opt.init(model_params)
+    actor_tx = optax.adam(config["lr_actor"])
+    actor_train_state = CustomTrainState.create(
+        apply_fn=actor.apply,
+        params=actor_params,
+        target_params=actor_params.copy(),
+        tx=actor_tx,
+    )
 
     test_env, test_env_params = gymnax.make(config["env_name"])
     test_env = TerminationTruncationWrapper(LogWrapper(test_env))
@@ -372,11 +382,11 @@ def prepare(key, config):
     eval_eps_ret_mean = jnp.nan; best_eps_ret = -jnp.inf
     train_state = (
         env_params, env_states, test_env_params, buffer_state,
-        model_params, target_model_params, opt_state,
+        actor_train_state, critic_train_state,
         eval_eps_ret_mean, best_eps_ret,
         key
     )
-    return env, test_env, buffer, qnet, actor, opt, train_state
+    return env, test_env, buffer, train_state
 
 
 def run_training(config, silent=False):
@@ -399,9 +409,9 @@ def run_training(config, silent=False):
     # prepare components
     key = random.key(config["seed"])
     key, init_key = random.split(key)
-    env, test_env, buffer, qnet, actor, opt, train_state = prepare(init_key, config)
+    env, test_env, buffer, train_state = prepare(init_key, config)
 
-    train_one_step = make_train_one_step(config, run_name, env, test_env, buffer, qnet, actor, opt)
+    train_one_step = make_train_one_step(config, run_name, env, test_env, buffer)
 
     # training loop
     print("start training...")
@@ -413,15 +423,15 @@ def run_training(config, silent=False):
     # parse train_state
     (
         env_params, env_states, test_env_params, buffer_state,
-        model_params, target_model_params, opt_state,
+        actor_train_state, critic_train_state,
         eval_eps_ret_mean, best_eps_ret,
         key
     ) = train_state
 
-    return run_name, model_params
+    return run_name, actor_train_state, critic_train_state
 
 
 if __name__ == "__main__":
     check_config(config)
-    run_name, model_params= run_training(config)
+    run_training(config)
 
