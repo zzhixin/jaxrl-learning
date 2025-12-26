@@ -1,8 +1,7 @@
-"""
-Compared with dqn, ddpg needs much larger buffer size and batch size
-because it tries to learn a more complex obs-action mapping. And the actor learning
-is more noisy.
-"""
+# Compared with dqn, ddpg needs much larger buffer size and batch size
+# because it tries to learn a more complex obs-action mapping. And the actor learning
+# is more noisy.
+
 import warnings
 warnings.filterwarnings("ignore")
 import gymnax
@@ -39,11 +38,11 @@ from pathlib import Path
 #  Config Dictionary
 config = {
     "project_name": "jaxrl",
-    # "env_name": "MountainCarContinuous-v0",
-    "env_name": "Pendulum-v1",
+    "env_name": "MountainCarContinuous-v0",
+    # "env_name": "Pendulum-v1",
     "total_timesteps": 200_000,
-    "lr_critic": 2e-3,
-    "lr_actor": 5e-3,
+    "lr_critic": 1e-3,
+    "lr_actor": 2e-3,
     "gamma": 0.99,
     "tau": 0.001,
     "target_update_interval": 1,
@@ -56,7 +55,7 @@ config = {
     "exploration_fraction": 0.5,
     "num_env": 1,
     "train_interval": 4,
-    "train_batch_size": 64,
+    "train_batch_size": 128,
     "buffer_size": 1e6,
     "learning_start": 1e4,
     "eval_interval": 8192,
@@ -112,18 +111,18 @@ class CustomTrainState(TrainState):
     target_params: FrozenDict = struct.field(pytree_node=True)
 
 
-def make_policy(use_eps_greedy, 
-                env, env_params, 
+def make_policy(env, env_params, 
                 actor_train_state: CustomTrainState,
+                use_eps_greedy,
                 eps_cur=None,
                 std=None):
     def noisy_policy(key, obs):
         mean = actor_train_state.apply_fn(actor_train_state.params, obs)
         lo = env.action_space(env_params).low
         hi = env.action_space(env_params).high
-        scale = hi - lo
-        noise = random.truncated_normal(key, lo, hi, mean.shape)*std*scale
-        return mean + noise
+        scale = (hi - lo)/2.
+        noise = random.normal(key, mean.shape)*std*scale
+        return jnp.clip(mean + noise, lo, hi)
     if std == 0.:
         sub_policy = lambda key, obs: actor_train_state.apply_fn(actor_train_state.params, obs)
     else:
@@ -152,9 +151,10 @@ def collect(key,
             num_steps: int):
     rollout_keys = jax.random.split(key, env.num_env)
 
-    policy = make_policy(config["use_eps_gready"], 
-                         env, env_params, 
-                         actor_train_state, eps_cur, 
+    policy = make_policy(env, env_params, 
+                         actor_train_state, 
+                         config["use_eps_gready"],
+                         eps_cur, 
                          config["exploration_noise"])
 
     env_state, exprs = batch_rollout(rollout_keys, env, env_state, env_params, policy, num_steps)
@@ -198,8 +198,7 @@ def update_model(gamma: float, buffer: ReplayBuffer, buffer_state,
 
         return jax.vmap(actor_loss_fn)(experiences).mean()
 
-    key, sample_key = random.split(key)
-    sampled_experiences = buffer.sample(sample_key, buffer_state)
+    sampled_experiences = buffer.sample(key, buffer_state)
 
     # update model
     critic_loss, critic_grads = jax.value_and_grad(batch_critic_loss_fn)(critic_params, sampled_experiences)
@@ -207,7 +206,7 @@ def update_model(gamma: float, buffer: ReplayBuffer, buffer_state,
     actor_train_state = actor_train_state.apply_gradients(grads=actor_grads)
     critic_train_state = critic_train_state.apply_gradients(grads=critic_grads)
 
-    return  actor_train_state, critic_train_state, key, {'critic_loss': critic_loss, 'actor_loss': actor_loss}
+    return  actor_train_state, critic_train_state, {'critic_loss': critic_loss, 'actor_loss': actor_loss}
 
 
 def make_update_model(gamma: float, buffer: ReplayBuffer, buffer_state: ReplayBufferState):
@@ -264,10 +263,10 @@ def train_one_step(
 
     # update model
     update_model = make_update_model(gamma, buffer, buffer_state)
-    actor_train_state, critic_train_state, key, loss = \
+    actor_train_state, critic_train_state, loss = \
         jax.lax.cond(is_update_model,
                      update_model,
-                     lambda *_: (actor_train_state, critic_train_state, sample_key, 
+                     lambda *_: (actor_train_state, critic_train_state, 
                                  {'critic_loss': jnp.float32(0.), 'actor_loss': jnp.float32(0.)}),
                      actor_train_state, critic_train_state, sample_key)
 
@@ -284,9 +283,9 @@ def train_one_step(
 
     # evaluation
     global_steps = (i_train_step + 1) * rollout_batch_size
-    eval_policy = make_policy(config["use_eps_gready"], 
-                              env, env_params, 
+    eval_policy = make_policy(env, env_params, 
                               actor_train_state,
+                              config["use_eps_gready"], 
                               0., 0.)
                             #   eps_cur, config["exploration_noise"])
     model_parms_to_save = {
@@ -323,7 +322,7 @@ def make_train_one_step(config, run_name, env, test_env, buffer):
 
 def prepare(key, config):
     key = jax.random.key(config["seed"])
-    key, init_reset_key, qnet_init_key, actor_init_key = jax.random.split(key, 4)
+    key, init_reset_key, critic_init_key, actor_init_key = jax.random.split(key, 4)
 
     env, env_params = gymnax.make(config["env_name"])
     env = TerminationTruncationWrapper(LogWrapper(env))
@@ -352,7 +351,7 @@ def prepare(key, config):
     buffer_state = buffer.init(dummy_transitions)
 
     critic = QNet(features=config["features"])
-    critic_params = critic.init(qnet_init_key, jnp.concat((obses, dummy_actions), axis=-1))
+    critic_params = critic.init(critic_init_key, jnp.concat((obses, dummy_actions), axis=-1))
     critic_tx = optax.adam(config["lr_critic"])
     critic_train_state = CustomTrainState.create(
         apply_fn=critic.apply,

@@ -13,6 +13,16 @@ from flax.core.frozen_dict import FrozenDict, freeze, unfreeze
 from typing import Callable
 from functools import partial
 
-d = FrozenDict({"a": 1, "b": 2})
-d2 = d.copy({"a": -1})
-print(d2)
+from jaxrl_learning.algos.ddpg import ActorNet, QNet, prepare, config, make_policy
+
+
+env, test_env, buffer, train_state = prepare(random.key(0), config)
+(
+    env_params, env_states, test_env_params, buffer_state,
+    actor_train_state, critic_train_state,
+    eval_eps_ret_mean, best_eps_ret,
+    key
+) = train_state
+
+policy = make_policy(env, env_params, actor_train_state, 
+                     use_eps_greedy=False, eps_cur=0.1, std=0.1)
