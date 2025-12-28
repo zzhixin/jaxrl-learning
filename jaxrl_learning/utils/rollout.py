@@ -39,6 +39,6 @@ def rollout(key, env, env_state, env_params, policy, rollout_num_steps=100, coll
 
 
 #%%
-def batch_rollout(keys, env, env_states, env_params, policy, trajectory_len=100):
+def batch_rollout(keys, env, env_states, env_params, policy, rollout_num_steps=100):
     b_rollout = jax.vmap(rollout, in_axes=(0, None, 0, None, None, None))
-    return b_rollout(keys, env, env_states, env_params, policy, trajectory_len)
+    return b_rollout(keys, env, env_states, env_params, policy, rollout_num_steps)

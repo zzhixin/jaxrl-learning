@@ -9,12 +9,10 @@ wheels/
 # Virtual environments
 .venv
 
-
 # logs
 wandb/
 ckpts/
 
-
 # others
 .vscode
-script
+script.py

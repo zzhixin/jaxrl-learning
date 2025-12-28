@@ -48,8 +48,9 @@ config = {
     "target_update_interval": 1,
     # "tau": 1.,
     # "target_update_interval": 500,
-    "exploration_noise": 0.1,
-    "use_eps_gready": False,
+    "exploration_type": "normal_noise", # "none", "normal_noise", "epsilon_greedy"
+    # "exploration_type": "epsilon_greedy", # "none", "normal_noise", "epsilon_greedy"
+    "exploration_noise": 0.2,
     "epsilon_start": 1.0,
     "epsilon_end": 0.05,
     "exploration_fraction": 0.5,
@@ -63,7 +64,8 @@ config = {
     "eval_num_env": 16,
     "log_interval": 8192,
     "wandb": True,
-    "ckpt_path": '/home/zhixin/jaxrl-learning/ckpts/'
+    "ckpt_path": '/home/zhixin/jaxrl-learning/ckpts/',
+    "silent": False
 }
 
 
@@ -111,32 +113,35 @@ class CustomTrainState(TrainState):
 
 def make_policy(env, env_params, 
                 actor_apply_fn: callable, actor_params,
-                use_eps_greedy,
+                exploration_type: str,
                 eps_cur=None,
                 std=None):
-    def noisy_policy(key, obs):
+    # Base policy (no exploration)
+    base_policy = lambda key, obs: actor_apply_fn(actor_params, obs)
+
+    def noisy_policy_fn(key, obs, std_dev):
         mean = actor_apply_fn(actor_params, obs)
         lo = env.action_space(env_params).low
         hi = env.action_space(env_params).high
         scale = (hi - lo)/2.
-        noise = random.normal(key, mean.shape)*std*scale
+        noise = random.normal(key, mean.shape)*std_dev*scale
         return jnp.clip(mean + noise, lo, hi)
-    if not std:
-        sub_policy = lambda key, obs: actor_apply_fn(actor_params, obs)
-    else:
-        sub_policy = noisy_policy
 
-    def eps_greedy_policy(key, obs, sub_policy):
+    def eps_greedy_policy_fn(key, obs, sub_policy_inner, epsilon):
         key, key1, key2, key3 = random.split(key, 4)
-        action = sub_policy(key3, obs)
-        cond = random.uniform(key1) < eps_cur
+        action = sub_policy_inner(key3, obs)
+        cond = random.uniform(key1) < epsilon
         rand_action = env.action_space(env_params).sample(key2)
         return (rand_action * cond + action * (1-cond))
 
-    if use_eps_greedy:
-        policy = partial(eps_greedy_policy, sub_policy=noisy_policy)
+    if exploration_type == "none":
+        policy = base_policy
+    elif exploration_type == "normal_noise":
+        policy = partial(noisy_policy_fn, std_dev=std)
+    elif exploration_type == "epsilon_greedy":
+        policy = partial(eps_greedy_policy_fn, sub_policy_inner=base_policy, epsilon=eps_cur)
     else:
-        policy = sub_policy
+        raise ValueError(f"Unknown exploration_type: {exploration_type}")
 
     return policy
 
@@ -151,7 +156,7 @@ def collect(config, key,
 
     policy = make_policy(env, env_params, 
                          actor_train_state.apply_fn, actor_train_state.params,
-                         config["use_eps_gready"],
+                         config["exploration_type"],
                          eps_cur, 
                          config["exploration_noise"])
 
@@ -190,7 +195,6 @@ def update_model(gamma: float, buffer: ReplayBuffer, buffer_state,
 
     def batch_actor_loss_fn(actor_params, experiences):
         def actor_loss_fn(expr):
-            # obs, *_ = experience
             obs = expr['obs']
             action = actor_train_state.apply_fn(actor_params, obs)
             q_pred = critic_train_state.apply_fn(critic_params, jnp.concat((obs, action), axis=-1))
@@ -254,11 +258,11 @@ def train_one_step(
 
     # collect data
     env_states, buffer_state, metrics = collect(config, rollout_key,
-                                       actor_train_state,
-                                       env, env_params, env_states,
-                                       eps_cur,
-                                       buffer, buffer_state,
-                                       metrics, rollout_num_steps)
+                                                actor_train_state,
+                                                env, env_params, env_states,
+                                                eps_cur,
+                                                buffer, buffer_state,
+                                                metrics, rollout_num_steps)
 
     # update model
     update_model = make_update_model(gamma, buffer, buffer_state)
@@ -286,9 +290,8 @@ def train_one_step(
     global_steps = (i_train_step + 1) * rollout_batch_size
     eval_policy = make_policy(env, env_params, 
                               actor_train_state.apply_fn, actor_train_state.params,
-                              config["use_eps_gready"], 
+                              "none", 
                               0., 0.)
-                            #   eps_cur, config["exploration_noise"])
     model_params_to_save = {
         "actor": actor_train_state.params,
         "critic": critic_train_state.params,
@@ -414,12 +417,12 @@ def prepare(key, config):
     return env, test_env, buffer, train_state
 
 
-def run_training(config, silent=False):
+def run_training(config):
     # extrac configurations
     rollout_batch_size = config["train_interval"]
     num_train_steps = config["total_timesteps"] // rollout_batch_size
     run_name = config["env_name"] + "__ddpg__" + datetime.now().strftime('%Y%m%d_%H%M%S')
-    if not silent:
+    if not config['silent']:
         print(f"config:\n{pprint.pformat(config)}")
 
     # wandb
@@ -428,7 +431,6 @@ def run_training(config, silent=False):
             project=config["project_name"],
             name=run_name,
             config=config,
-            monitor_gym=False
         )
 
     # prepare components
@@ -454,10 +456,9 @@ def run_training(config, silent=False):
 
     if config["wandb"]:
         wandb.finish()
-    return run_name, actor_train_state, critic_train_state
+    return metrics, actor_train_state, critic_train_state
 
 
 if __name__ == "__main__":
     check_config(config)
     run_training(config)
-

@@ -33,7 +33,7 @@ key = random.key(0)
 rollout_keys = random.split(key, NUM_ENVS)
 
 env_state, (obses, actions, rewards, next_obses, ters, trus, infos) = \
-    batch_rollout(rollout_keys, env, env_states, env_params, policy, trajectory_len=100)
+    batch_rollout(rollout_keys, env, env_states, env_params, policy, rollout_num_steps=100)
 
 flat_actions = jnp.reshape(actions, (-1,) + env.action_space(env_params).shape)[...,0]
 
@@ -41,3 +41,19 @@ import matplotlib.pyplot as plt
 
 plt.hist(flat_actions)
 plt.show()
+
+
+#%%
+import jax 
+from jax import numpy as jnp, random
+from flax.core.frozen_dict import freeze
+
+def foo(data):
+    return data['x'] + data['y']
+
+data = {
+    'x': jnp.ones((10, 2)),
+    'y': jnp.ones((2,)),
+}
+foo_vjit = jax.jit(jax.vmap(foo, in_axes=({'x': 0, 'y': None},)))
+foo_vjit(data)
