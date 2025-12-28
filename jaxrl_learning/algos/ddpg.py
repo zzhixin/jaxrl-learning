@@ -23,17 +23,14 @@ from functools import partial
 
 from jaxrl_learning.utils.wrapper import LogWrapper, TerminationTruncationWrapper
 from jaxrl_learning.utils.replay_buffer import ReplayBuffer, ReplayBufferState, make_replay_buffer
-from jaxrl_learning.utils.rollout import batch_rollout
+from jaxrl_learning.utils.rollout import batch_rollout, rollout
 from jaxrl_learning.utils.evals import make_eval_continuous
 from jaxrl_learning.utils.utils import make_save_model
 import pprint
 from datetime import datetime
-from colorama import Fore, Style, init
-init(autoreset=True)
-from jaxrl_learning.benchmark.monitor_recompile import monitor_recompiles
-import orbax.checkpoint as ocp
-import jax
-from pathlib import Path
+import colorama
+from colorama import Fore, Style
+colorama.init(autoreset=True)
 
 
 #  Config Dictionary
@@ -81,7 +78,6 @@ def check_config(config):
     assert config["eval_num_steps"] > env_params.max_steps_in_episode
 
 
-#  Q net
 class QNet(nn.Module):
     features: tuple
 
@@ -150,7 +146,7 @@ def collect(config, key,
             env, env_params: gymnax.EnvParams, env_state: gymnax.EnvState,
             eps_cur: float,
             buffer: ReplayBuffer, buffer_state: ReplayBufferState,
-            num_steps: int):
+            metrics, num_steps: int):
     rollout_keys = jax.random.split(key, env.num_env)
 
     policy = make_policy(env, env_params, 
@@ -160,12 +156,14 @@ def collect(config, key,
                          config["exploration_noise"])
 
     env_state, exprs = batch_rollout(rollout_keys, env, env_state, env_params, policy, num_steps)
-    exprs = exprs[:-1]   # exclude the info
-    exprs_dict = {'obs': exprs[0], 'action': exprs[1], 'rew': exprs[2], 'next_obs': exprs[3], 'ter': exprs[4], 'tru': exprs[5]}
-    flat_exprs_dict = jax.tree.map(lambda x: jnp.reshape(x, shape=(-1, *x.shape[2:])), exprs_dict)
-    buffer_state = buffer.add(buffer_state, flat_exprs_dict)
+    flat_exprs = jax.tree.map(lambda x: jnp.reshape(x, shape=(-1, *x.shape[2:])), exprs)
+    buffer_state = buffer.add(buffer_state, flat_exprs)
 
-    return  env_state, buffer_state
+    infos = flat_exprs['info']
+    metrics = metrics.copy({"charts/episodic_return": jnp.mean(infos['returned_episode_returns']),
+                            "charts/episodic_length": jnp.mean(infos['returned_episode_lengths'])})
+
+    return  env_state, buffer_state, metrics
 
 
 def update_model(gamma: float, buffer: ReplayBuffer, buffer_state, 
@@ -255,12 +253,12 @@ def train_one_step(
     key, rollout_key, sample_key, test_key = jax.random.split(key, 4)
 
     # collect data
-    env_states, buffer_state = collect(config, rollout_key,
+    env_states, buffer_state, metrics = collect(config, rollout_key,
                                        actor_train_state,
                                        env, env_params, env_states,
                                        eps_cur,
                                        buffer, buffer_state,
-                                       rollout_num_steps)
+                                       metrics, rollout_num_steps)
 
     # update model
     update_model = make_update_model(gamma, buffer, buffer_state)
@@ -364,14 +362,10 @@ def prepare(key, config):
         rollout_batch=rollout_batch_size,
         sample_batch=config["train_batch_size"],
     )
-    dummy_transitions = {
-        'obs': jnp.zeros((rollout_batch_size,) + env.observation_space(env_params).shape),
-        'action': jnp.zeros((rollout_batch_size,) + env.action_space(env_params).shape),
-        'rew': jnp.zeros((rollout_batch_size,)),
-        'next_obs': jnp.zeros((rollout_batch_size,) + env.observation_space(env_params).shape),
-        'ter':  jnp.zeros((rollout_batch_size,)),
-        'tru': jnp.zeros((rollout_batch_size,))
-    }
+    _, dummy_state = env.reset(random.key(0), env_params)
+    _, dummy_transitions = rollout(random.key(0), env, dummy_state, env_params, 
+                                lambda key, obs: env.action_space(env_params).sample(key),
+                                rollout_num_steps=rollout_batch_size)
     buffer_state = buffer.init(dummy_transitions)
 
     critic = QNet(features=config["features"])
@@ -404,9 +398,12 @@ def prepare(key, config):
 
     metrics = FrozenDict({
         "charts/global_steps": 0,
+        "charts/episodic_return": jnp.nan,
+        "charts/episodic_length": jnp.nan,
         "losses/actor_loss": jnp.nan,
         "losses/critic_loss": jnp.nan,
         "eval/episodic_return": jnp.nan,
+        "eval/episodic_length": jnp.nan,
         "eval/best_episodic_return": -jnp.inf
     })
     train_state = (

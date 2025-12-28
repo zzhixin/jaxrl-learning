@@ -57,13 +57,15 @@ def evaluate_continuous_action(key,
     obses, env_states = jax.vmap(env.reset, in_axes=(0, None))(reset_keys, env_params)
     
     env_states, sampled_experiences = batch_rollout(rollout_keys, env, env_states, env_params, policy, num_steps)
-    *_, infos = sampled_experiences
+    infos = sampled_experiences['info']
     episode_return_mean = (infos["returned_episode_returns"] * infos["returned_episode"]).sum() \
+        / infos["returned_episode"].sum()
+    episode_length_mean = (infos["returned_episode_lengths"] * infos["returned_episode"]).sum() \
         / infos["returned_episode"].sum()
     
     # jax.debug.print("global_steps: {},  episode_return_mean: {:.2f}", global_steps, episode_return_mean)
 
-    return episode_return_mean
+    return episode_return_mean, episode_length_mean
 
 
 def make_eval_continuous(
@@ -73,12 +75,13 @@ def make_eval_continuous(
     def eval_(key):
         nonlocal metrics
         best_eps_ret = metrics["eval/best_episodic_return"]
-        eps_ret_mean = evaluate_continuous_action(key, policy, env, env_params, num_env, num_steps, global_steps)
+        eps_ret_mean, eps_len_mean = evaluate_continuous_action(key, policy, env, env_params, num_env, num_steps, global_steps)
 
         is_best_model = eps_ret_mean > best_eps_ret
         best_eps_ret = jnp.maximum(best_eps_ret, eps_ret_mean)
         metrics = metrics.copy({
             "eval/episodic_return": eps_ret_mean,
+            "eval/episodic_length": eps_len_mean,
             "eval/best_episodic_return": best_eps_ret})
         return is_best_model, metrics
 
