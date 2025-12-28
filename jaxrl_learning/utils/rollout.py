@@ -18,7 +18,6 @@ def rollout(key, env, env_state, env_params, policy, rollout_num_steps=100, incl
         # action = env.action_space(env_params).sample(key_act_cur)
         action = policy(key_act, obs)
         next_obs, next_state, reward, ter, tru, info = env.step(key_step, state, action, env_params)
-        # jax.debug.print("{done},{reward}\n{info}", done=done, reward=reward, info=info)
         if include_state_seq:
             transition = (state, obs, action, reward, next_obs, ter, tru, info)
         else:

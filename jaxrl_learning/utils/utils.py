@@ -33,3 +33,15 @@ def save_model(config, model_params, run_name, model_name):
         ckptr.save(path / run_name / model_name, model_params)
     jax.debug.print(f"{model_name} saved.")
     
+
+def make_save_model(config, run_name, model_name):
+    """
+    Usage: 
+    ```python
+    save_model_fn = make_save_model(config, run_name, model_name)
+    jax.debug.callback(save_model_fn, model_params)
+    ```
+    """
+    def save_model_(model_params):
+        return save_model(config, model_params, run_name, model_name)
+    return save_model_

@@ -1,8 +1,11 @@
 Pendulum_v1_config = {
+    "seed": 0,
     "project_name": "jaxrl",
     "env_name": "Pendulum-v1",
-    "total_timesteps": 100_000,
-    "lr": 5e-3,
+    "total_timesteps": 200_000,
+    "features": (128, 64),
+    "lr_critic": 1e-3,
+    "lr_actor": 5e-4,
     "gamma": 0.99,
     "tau": 0.001,
     "target_update_interval": 1,
@@ -19,9 +22,7 @@ Pendulum_v1_config = {
     "eval_interval": 8192,
     "eval_num_steps": 2000,
     "eval_num_env": 16,
-    "features": (128, 64),
-    "seed": 0,
-    "log_freq": 1000,
+    "log_interval": 8192,
     "wandb": False,
     "ckpt_path": '/home/zhixin/jaxrl-learning/ckpts/'
 }

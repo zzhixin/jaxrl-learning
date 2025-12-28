@@ -10,11 +10,11 @@ import jax
 jax.config.update("jax_platform_name", "cpu")
 # jax.config.update("jax_log_compiles", "1")
 # jax.config.update("jax_debug_nans", True)
-# jax.disable_jit(disable=True)
+# jax.config.update("jax_disable_jit", True)
 from jax import random, numpy as jnp
 from flax import linen as nn
 from flax.training.train_state import TrainState
-from flax.core.frozen_dict import FrozenDict
+from flax.core.frozen_dict import FrozenDict, freeze, unfreeze
 from flax import struct
 import optax
 import time
@@ -24,7 +24,8 @@ from functools import partial
 from jaxrl_learning.utils.wrapper import LogWrapper, TerminationTruncationWrapper
 from jaxrl_learning.utils.replay_buffer import ReplayBuffer, ReplayBufferState, make_replay_buffer
 from jaxrl_learning.utils.rollout import batch_rollout
-from jaxrl_learning.utils.evals import evaluate_continuous_action, make_eval_and_logging_continuous
+from jaxrl_learning.utils.evals import make_eval_continuous
+from jaxrl_learning.utils.utils import make_save_model
 import pprint
 from datetime import datetime
 from colorama import Fore, Style, init
@@ -37,12 +38,14 @@ from pathlib import Path
 
 #  Config Dictionary
 config = {
+    "seed": 0,
     "project_name": "jaxrl",
-    "env_name": "MountainCarContinuous-v0",
-    # "env_name": "Pendulum-v1",
-    "total_timesteps": 200_000,
+    # "env_name": "MountainCarContinuous-v0",
+    "env_name": "Pendulum-v1",
+    "total_timesteps": 100_000,
+    "features": (128, 64),
     "lr_critic": 1e-3,
-    "lr_actor": 2e-3,
+    "lr_actor": 5e-4,
     "gamma": 0.99,
     "tau": 0.001,
     "target_update_interval": 1,
@@ -55,16 +58,14 @@ config = {
     "exploration_fraction": 0.5,
     "num_env": 1,
     "train_interval": 4,
-    "train_batch_size": 128,
+    "train_batch_size": 64,
     "buffer_size": 1e6,
     "learning_start": 1e4,
     "eval_interval": 8192,
     "eval_num_steps": 2000,
     "eval_num_env": 16,
-    "features": (128, 64),
-    "seed": 0,
-    "log_freq": 1000,
-    "wandb": False,
+    "log_interval": 8192,
+    "wandb": True,
     "ckpt_path": '/home/zhixin/jaxrl-learning/ckpts/'
 }
 
@@ -74,7 +75,8 @@ def check_config(config):
     assert config["train_interval"] % config["num_env"] == 0
     assert config["total_timesteps"] > config["learning_start"]
     assert config["eval_interval"] > config["train_interval"]
-    assert config["eval_interval"] % config["train_interval"] == 0
+    assert config["eval_interval"] % config["log_interval"] == 0
+    assert config["log_interval"] % config["train_interval"] == 0
     _, env_params = gymnax.make(config["env_name"])
     assert config["eval_num_steps"] > env_params.max_steps_in_episode
 
@@ -112,19 +114,19 @@ class CustomTrainState(TrainState):
 
 
 def make_policy(env, env_params, 
-                actor_train_state: CustomTrainState,
+                actor_apply_fn: callable, actor_params,
                 use_eps_greedy,
                 eps_cur=None,
                 std=None):
     def noisy_policy(key, obs):
-        mean = actor_train_state.apply_fn(actor_train_state.params, obs)
+        mean = actor_apply_fn(actor_params, obs)
         lo = env.action_space(env_params).low
         hi = env.action_space(env_params).high
         scale = (hi - lo)/2.
         noise = random.normal(key, mean.shape)*std*scale
         return jnp.clip(mean + noise, lo, hi)
-    if std == 0.:
-        sub_policy = lambda key, obs: actor_train_state.apply_fn(actor_train_state.params, obs)
+    if not std:
+        sub_policy = lambda key, obs: actor_apply_fn(actor_params, obs)
     else:
         sub_policy = noisy_policy
 
@@ -143,8 +145,8 @@ def make_policy(env, env_params,
     return policy
 
 
-def collect(key,
-            actor_train_state,
+def collect(config, key,
+            actor_train_state: CustomTrainState,
             env, env_params: gymnax.EnvParams, env_state: gymnax.EnvState,
             eps_cur: float,
             buffer: ReplayBuffer, buffer_state: ReplayBufferState,
@@ -152,7 +154,7 @@ def collect(key,
     rollout_keys = jax.random.split(key, env.num_env)
 
     policy = make_policy(env, env_params, 
-                         actor_train_state, 
+                         actor_train_state.apply_fn, actor_train_state.params,
                          config["use_eps_gready"],
                          eps_cur, 
                          config["exploration_noise"])
@@ -205,8 +207,7 @@ def update_model(gamma: float, buffer: ReplayBuffer, buffer_state,
     actor_loss, actor_grads = jax.value_and_grad(batch_actor_loss_fn)(actor_params, sampled_experiences)
     actor_train_state = actor_train_state.apply_gradients(grads=actor_grads)
     critic_train_state = critic_train_state.apply_gradients(grads=critic_grads)
-
-    return  actor_train_state, critic_train_state, {'critic_loss': critic_loss, 'actor_loss': actor_loss}
+    return  actor_train_state, critic_train_state, {'losses/critic_loss': critic_loss, 'losses/actor_loss': actor_loss}
 
 
 def make_update_model(gamma: float, buffer: ReplayBuffer, buffer_state: ReplayBufferState):
@@ -224,8 +225,7 @@ def train_one_step(
     (
         env_params, env_states, test_env_params, buffer_state,
         actor_train_state, critic_train_state,
-        eval_eps_ret_mean, best_eps_ret,
-        key
+        metrics, key
     ) = train_state
 
     rollout_batch_size = config["train_interval"]
@@ -237,6 +237,7 @@ def train_one_step(
     tau = config["tau"]
 
     global_steps = rollout_batch_size * i_train_step
+    metrics = metrics.copy({"charts/global_steps": global_steps})
 
     # epsilon Schedule
     def get_epsilon(i_step):
@@ -254,7 +255,7 @@ def train_one_step(
     key, rollout_key, sample_key, test_key = jax.random.split(key, 4)
 
     # collect data
-    env_states, buffer_state = collect(rollout_key,
+    env_states, buffer_state = collect(config, rollout_key,
                                        actor_train_state,
                                        env, env_params, env_states,
                                        eps_cur,
@@ -267,8 +268,10 @@ def train_one_step(
         jax.lax.cond(is_update_model,
                      update_model,
                      lambda *_: (actor_train_state, critic_train_state, 
-                                 {'critic_loss': jnp.float32(0.), 'actor_loss': jnp.float32(0.)}),
+                                 {'losses/critic_loss': jnp.float32(0.), 'losses/actor_loss': jnp.float32(0.)}),
                      actor_train_state, critic_train_state, sample_key)
+    
+    metrics = metrics.copy(loss)
 
     # update target model
     effective_tau = jnp.where(is_update_target_model, tau, 0.0)
@@ -284,33 +287,54 @@ def train_one_step(
     # evaluation
     global_steps = (i_train_step + 1) * rollout_batch_size
     eval_policy = make_policy(env, env_params, 
-                              actor_train_state,
+                              actor_train_state.apply_fn, actor_train_state.params,
                               config["use_eps_gready"], 
                               0., 0.)
                             #   eps_cur, config["exploration_noise"])
-    model_parms_to_save = {
+    model_params_to_save = {
         "actor": actor_train_state.params,
         "critic": critic_train_state.params,
     }
-    eval_and_logging = make_eval_and_logging_continuous(
-        config, run_name, best_eps_ret, model_parms_to_save, eval_policy, 
+    eval = make_eval_continuous(
+        metrics, eval_policy, 
         test_env, test_env_params, 
         config["eval_num_env"], config["eval_num_steps"], global_steps
     )
-    eval_eps_ret_mean, best_eps_ret = jax.lax.cond(
+    is_best_model, metrics = jax.lax.cond(
         global_steps % (config["eval_interval"]) == 0,
-        eval_and_logging,
-        lambda *_: (eval_eps_ret_mean, best_eps_ret),
+        eval,
+        lambda *_: (False, metrics),
         test_key)
+    
+    # save best model
+    save_model_fn = make_save_model(config, run_name, "best_model")
+    jax.lax.cond((global_steps % (config["eval_interval"]) == 0) & is_best_model,
+                 lambda: jax.debug.callback(save_model_fn, model_params_to_save),
+                 lambda: None)
+
+    # logging
+    def log_metrics_callback(metrics, global_steps):
+        metrics_to_log = unfreeze(metrics)
+        if not global_steps % config["eval_interval"] == 0:
+            for key in metrics_to_log.copy():
+                if 'eval' in key:
+                    del metrics_to_log[key]
+        print(f"global_steps: {global_steps},  episode_return: {metrics["eval/episodic_return"]}")
+        if config["wandb"]:
+            wandb.log(metrics_to_log)
+
+    jax.lax.cond(global_steps % config["log_interval"] == 0,
+                 lambda: jax.debug.callback(log_metrics_callback, metrics, global_steps),
+                 lambda: None)
 
     train_state = (
         env_params, env_states, test_env_params, buffer_state,
         actor_train_state, critic_train_state,
-        eval_eps_ret_mean, best_eps_ret,
+        metrics,
         key
     )
 
-    return  train_state, eval_eps_ret_mean
+    return  train_state, metrics
 
 
 def make_train_one_step(config, run_name, env, test_env, buffer):
@@ -378,12 +402,17 @@ def prepare(key, config):
     test_env, test_env_params = gymnax.make(config["env_name"])
     test_env = TerminationTruncationWrapper(LogWrapper(test_env))
 
-    eval_eps_ret_mean = jnp.nan; best_eps_ret = -jnp.inf
+    metrics = FrozenDict({
+        "charts/global_steps": 0,
+        "losses/actor_loss": jnp.nan,
+        "losses/critic_loss": jnp.nan,
+        "eval/episodic_return": jnp.nan,
+        "eval/best_episodic_return": -jnp.inf
+    })
     train_state = (
         env_params, env_states, test_env_params, buffer_state,
         actor_train_state, critic_train_state,
-        eval_eps_ret_mean, best_eps_ret,
-        key
+        metrics, key
     )
     return env, test_env, buffer, train_state
 
@@ -415,7 +444,7 @@ def run_training(config, silent=False):
     # training loop
     print("start training...")
     start_time = time.time()
-    train_state, eps_ret_means = jax.lax.scan(train_one_step, train_state, jnp.arange(num_train_steps))
+    train_state, metrics = jax.lax.scan(train_one_step, train_state, jnp.arange(num_train_steps))
     train_state = jax.block_until_ready(train_state)
     print(f"{Fore.BLUE}Training finished in {time.time() - start_time:.2f}s")
 
@@ -423,10 +452,11 @@ def run_training(config, silent=False):
     (
         env_params, env_states, test_env_params, buffer_state,
         actor_train_state, critic_train_state,
-        eval_eps_ret_mean, best_eps_ret,
-        key
+        metrics, key
     ) = train_state
 
+    if config["wandb"]:
+        wandb.finish()
     return run_name, actor_train_state, critic_train_state
 
 

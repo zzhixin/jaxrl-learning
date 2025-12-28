@@ -61,28 +61,25 @@ def evaluate_continuous_action(key,
     episode_return_mean = (infos["returned_episode_returns"] * infos["returned_episode"]).sum() \
         / infos["returned_episode"].sum()
     
-    jax.debug.print("global_steps: {},  episode_return_mean: {:.2f}", global_steps, episode_return_mean)
+    # jax.debug.print("global_steps: {},  episode_return_mean: {:.2f}", global_steps, episode_return_mean)
 
     return episode_return_mean
 
 
-def make_eval_and_logging_continuous(
-        config, run_name, best_eps_ret,
-        model_params_to_save,
+def make_eval_continuous(
+        metrics,
         policy, env, env_params, num_env, num_steps, 
         global_steps):
-    def eval_and_logging(key):
-        nonlocal best_eps_ret
+    def eval_(key):
+        nonlocal metrics
+        best_eps_ret = metrics["eval/best_episodic_return"]
         eps_ret_mean = evaluate_continuous_action(key, policy, env, env_params, num_env, num_steps, global_steps)
 
-        # save best model so far
-        def save_model_fn():
-            save_model_callback = lambda model_params: save_model(config, model_params, run_name, "best_model") 
-            jax.debug.callback(save_model_callback, model_params_to_save)
-        jax.lax.cond(eps_ret_mean > best_eps_ret,
-                     save_model_fn,
-                     lambda: None)
+        is_best_model = eps_ret_mean > best_eps_ret
         best_eps_ret = jnp.maximum(best_eps_ret, eps_ret_mean)
-        return eps_ret_mean, best_eps_ret
+        metrics = metrics.copy({
+            "eval/episodic_return": eps_ret_mean,
+            "eval/best_episodic_return": best_eps_ret})
+        return is_best_model, metrics
 
-    return eval_and_logging
+    return eval_
