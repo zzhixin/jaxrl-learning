@@ -42,13 +42,25 @@ class OrnsteinUhlenbeckActionNoise(object):
 
 def save_model(config, model_params, run_name, model_name):
     # path = ocp.test_utils.erase_and_create_empty(config["ckpt_path"])
-    path = Path(config["ckpt_path"])
-    model_path = path / run_name / model_name
+    use_wandb = False
+    if config.get("wandb"):
+        try:
+            import wandb
+            use_wandb = wandb.run is not None
+        except Exception:
+            use_wandb = False
+    if use_wandb:
+        base_path = Path(wandb.run.dir) / "ckpts"
+        model_path = base_path / model_name
+    else:
+        base_path = Path(config["ckpt_path"]) / run_name
+        model_path = base_path / model_name
+    base_path.mkdir(parents=True, exist_ok=True)
     import shutil
     if model_path.is_dir():
         shutil.rmtree(model_path)
     with ocp.StandardCheckpointer() as ckptr:
-        ckptr.save(path / run_name / model_name, model_params)
+        ckptr.save(model_path, model_params)
     jax.debug.print(f"{model_name} saved.")
     
 

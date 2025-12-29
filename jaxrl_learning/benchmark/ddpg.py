@@ -1,35 +1,51 @@
-Pendulum_v1_config = {
-    "seed": 0,
-    "project_name": "jaxrl",
-    "env_name": "Pendulum-v1",
-    "total_timesteps": 200_000,
-    "features": (128, 64),
-    "lr_critic": 1e-3,
-    "lr_actor": 5e-4,
-    "gamma": 0.99,
-    "tau": 0.001,
-    "target_update_interval": 1,
-    "exploration_noise": 0.1,
-    "use_eps_gready": False,
-    "epsilon_start": 1.0,
-    "epsilon_end": 0.05,
-    "exploration_fraction": 0.5,
-    "num_env": 1,
-    "train_interval": 4,
-    "train_batch_size": 64,
-    "buffer_size": 1e6,
-    "learning_start": 1e4,
-    "eval_interval": 8192,
-    "eval_num_steps": 2000,
-    "eval_num_env": 16,
-    "log_interval": 8192,
-    "wandb": False,
-    "ckpt_path": '/home/zhixin/jaxrl-learning/ckpts/'
-}
+import argparse
+from pathlib import Path
+import yaml
+
+DEFAULT_CONFIG_PATH = Path(__file__).with_name("ddpg_configs.yaml")
+
+
+def load_configs(config_path: Path):
+    with config_path.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    configs = data.get("configs", data)
+    if not isinstance(configs, dict):
+        raise ValueError("Config file must contain a mapping of env_name to config.")
+    for cfg in configs.values():
+        if "features" in cfg and isinstance(cfg["features"], list):
+            cfg["features"] = tuple(cfg["features"])
+    return configs
+
+
+_CONFIGS = load_configs(DEFAULT_CONFIG_PATH)
+Pendulum_v1_config = _CONFIGS.get("Pendulum-v1", {})
+MountainCarContinuous_v0_config = _CONFIGS.get("MountainCarContinuous-v0", {})
 
 
 if __name__ == "__main__":
-    config = Pendulum_v1_config
+    parser = argparse.ArgumentParser(description="Run DDPG benchmarks.")
+    parser.add_argument(
+        "--config",
+        default=str(DEFAULT_CONFIG_PATH),
+        help="Path to ddpg config YAML.",
+    )
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--all", action="store_true", help="Run all env configs.")
+    group.add_argument("--single-env", help="Run a single env by name.")
+    args = parser.parse_args()
+
+    configs = load_configs(Path(args.config))
+
     from jaxrl_learning.algos.ddpg import check_config, run_training
-    check_config(config)
-    run_name, qnet_params, actor_params = run_training(config)
+
+    if args.all:
+        for env_name, config in configs.items():
+            print(f"Running env: {env_name}")
+            check_config(config)
+            run_training(config)
+    else:
+        if args.single_env not in configs:
+            raise ValueError(f"Unknown env: {args.single_env}. Available: {list(configs.keys())}")
+        config = configs[args.single_env]
+        check_config(config)
+        run_training(config)

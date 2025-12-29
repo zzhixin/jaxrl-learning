@@ -37,12 +37,12 @@ colorama.init(autoreset=True)
 config = {
     "seed": 0,
     "project_name": "jaxrl",
-    # "env_name": "MountainCarContinuous-v0",
-    "env_name": "Pendulum-v1",
+    "env_name": "MountainCarContinuous-v0",
+    # "env_name": "Pendulum-v1",
     "total_timesteps": 200_000,
     "features": (128, 64),
     "lr_critic": 1e-3,
-    "lr_actor": 5e-4,
+    "lr_actor": 1e-3,
     "gamma": 0.99,
     "tau": 0.001,
     "target_update_interval": 1,
@@ -50,15 +50,17 @@ config = {
     # "target_update_interval": 500,
     # "exploration_type": "normal_noise", # "none", "normal_noise", "epsilon_greedy", "ou_noise"
     "exploration_type": "ou_noise", # "none", "normal_noise", "epsilon_greedy", "ou_noise"
-    "exploration_noise": 0.1,
+    "exploration_noise": 0.5,
+    "exploration_noise_end": 0.0,
+    "exploration_noise_decay": True,
     "ou_theta": 0.15,
     "epsilon_start": 1.0,
     "epsilon_end": 0.05,
-    "exploration_fraction": 0.5,
+    "exploration_fraction": 0.9,
     "num_env": 1,
     "train_interval": 4,
     "train_batch_size": 64,
-    "buffer_size": 1e6,
+    "buffer_size": 1e5 ,
     "learning_start": 1e4,
     "eval_interval": 8192,
     "eval_num_steps": 2000,
@@ -118,19 +120,19 @@ def make_policy(env, env_params,
                 eps_cur=None,
                 std=None,
                 ou_theta=None,
-                ou_dt=1.0):
+                dt=1.0):
     # Base policy (no exploration)
     base_policy = lambda key, obs: actor_apply_fn(actor_params, obs)
 
-    def noisy_policy_fn(key, obs, std_dev):
+    def normal_noisy_policy_fn(key, obs, std_dev, dt):
         mean = actor_apply_fn(actor_params, obs)
         lo = env.action_space(env_params).low
         hi = env.action_space(env_params).high
-        scale = (hi - lo)/2.
-        noise = random.normal(key, mean.shape)*std_dev*scale
+        action_scale = (hi - lo)/2.
+        noise = random.normal(key, mean.shape) * std_dev * jnp.sqrt(dt) * action_scale
         return jnp.clip(mean + noise, lo, hi)
 
-    def ou_policy_fn(key, obs, ou_state, theta, sigma, dt):
+    def ou_noise_policy_fn(key, obs, ou_state, theta, sigma, dt):
         mean = actor_apply_fn(actor_params, obs)
         lo = env.action_space(env_params).low
         hi = env.action_space(env_params).high
@@ -150,11 +152,11 @@ def make_policy(env, env_params,
     if exploration_type == "none":
         policy = base_policy
     elif exploration_type == "normal_noise":
-        policy = partial(noisy_policy_fn, std_dev=std)
+        policy = partial(normal_noisy_policy_fn, std_dev=std, dt=dt)
     elif exploration_type == "epsilon_greedy":
         policy = partial(eps_greedy_policy_fn, sub_policy_inner=base_policy, epsilon=eps_cur)
     elif exploration_type == "ou_noise":
-        policy = partial(ou_policy_fn, theta=ou_theta, sigma=std, dt=ou_dt)
+        policy = partial(ou_noise_policy_fn, theta=ou_theta, sigma=std, dt=dt)
     else:
         raise ValueError(f"Unknown exploration_type: {exploration_type}")
 
@@ -165,6 +167,7 @@ def collect(config, key,
             actor_train_state: CustomTrainState,
             env, env_params: gymnax.EnvParams, env_state: gymnax.EnvState,
             eps_cur: float,
+            noise_std: float,
             buffer: ReplayBuffer, buffer_state: ReplayBufferState,
             metrics, num_steps: int):
     rollout_keys = jax.random.split(key, env.num_env)
@@ -173,7 +176,7 @@ def collect(config, key,
                          actor_train_state.apply_fn, actor_train_state.params,
                          config["exploration_type"],
                          eps_cur, 
-                         config["exploration_noise"],
+                         noise_std,
                          config["ou_theta"],
                          1.0)  # dt=1 per env step; keep OU dt out of config for consistency
     policy_has_state = config["exploration_type"] == "ou_noise"
@@ -272,6 +275,17 @@ def train_one_step(
         return eps
 
     eps_cur = get_epsilon(i_train_step)
+    # noise Schedule (for normal_noise and ou_noise), decays over full training
+    def get_noise_std(i_step):
+        if not config["exploration_noise_decay"]:
+            return config["exploration_noise"]
+        steps_fraction = i_step / num_updates
+        std = jnp.interp(steps_fraction,
+                         jnp.array([0., 1.]),
+                         jnp.array([config["exploration_noise"], config["exploration_noise_end"]]))
+        return std
+
+    noise_std = get_noise_std(i_train_step)
 
     is_update_model = global_steps > learning_start
     is_update_target_model = is_update_model & (i_train_step % target_update_interval == 0)
@@ -283,6 +297,7 @@ def train_one_step(
                                                 actor_train_state,
                                                 env, env_params, env_states,
                                                 eps_cur,
+                                                noise_std,
                                                 buffer, buffer_state,
                                                 metrics, rollout_num_steps)
 
