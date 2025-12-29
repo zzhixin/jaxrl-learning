@@ -39,7 +39,7 @@ config = {
     "project_name": "jaxrl",
     # "env_name": "MountainCarContinuous-v0",
     "env_name": "Pendulum-v1",
-    "total_timesteps": 100_000,
+    "total_timesteps": 200_000,
     "features": (128, 64),
     "lr_critic": 1e-3,
     "lr_actor": 5e-4,
@@ -48,9 +48,10 @@ config = {
     "target_update_interval": 1,
     # "tau": 1.,
     # "target_update_interval": 500,
-    "exploration_type": "normal_noise", # "none", "normal_noise", "epsilon_greedy"
-    # "exploration_type": "epsilon_greedy", # "none", "normal_noise", "epsilon_greedy"
-    "exploration_noise": 0.2,
+    # "exploration_type": "normal_noise", # "none", "normal_noise", "epsilon_greedy", "ou_noise"
+    "exploration_type": "ou_noise", # "none", "normal_noise", "epsilon_greedy", "ou_noise"
+    "exploration_noise": 0.1,
+    "ou_theta": 0.15,
     "epsilon_start": 1.0,
     "epsilon_end": 0.05,
     "exploration_fraction": 0.5,
@@ -115,7 +116,9 @@ def make_policy(env, env_params,
                 actor_apply_fn: callable, actor_params,
                 exploration_type: str,
                 eps_cur=None,
-                std=None):
+                std=None,
+                ou_theta=None,
+                ou_dt=1.0):
     # Base policy (no exploration)
     base_policy = lambda key, obs: actor_apply_fn(actor_params, obs)
 
@@ -126,6 +129,16 @@ def make_policy(env, env_params,
         scale = (hi - lo)/2.
         noise = random.normal(key, mean.shape)*std_dev*scale
         return jnp.clip(mean + noise, lo, hi)
+
+    def ou_policy_fn(key, obs, ou_state, theta, sigma, dt):
+        mean = actor_apply_fn(actor_params, obs)
+        lo = env.action_space(env_params).low
+        hi = env.action_space(env_params).high
+        scale = (hi - lo)/2.
+        # Discrete-time OU with dt=1 per env step (same convention as normal noise).
+        noise = ou_state + theta * (0. - ou_state) * dt \
+            + sigma * jnp.sqrt(dt) * random.normal(key, mean.shape) * scale
+        return jnp.clip(mean + noise, lo, hi), noise
 
     def eps_greedy_policy_fn(key, obs, sub_policy_inner, epsilon):
         key, key1, key2, key3 = random.split(key, 4)
@@ -140,6 +153,8 @@ def make_policy(env, env_params,
         policy = partial(noisy_policy_fn, std_dev=std)
     elif exploration_type == "epsilon_greedy":
         policy = partial(eps_greedy_policy_fn, sub_policy_inner=base_policy, epsilon=eps_cur)
+    elif exploration_type == "ou_noise":
+        policy = partial(ou_policy_fn, theta=ou_theta, sigma=std, dt=ou_dt)
     else:
         raise ValueError(f"Unknown exploration_type: {exploration_type}")
 
@@ -158,9 +173,16 @@ def collect(config, key,
                          actor_train_state.apply_fn, actor_train_state.params,
                          config["exploration_type"],
                          eps_cur, 
-                         config["exploration_noise"])
+                         config["exploration_noise"],
+                         config["ou_theta"],
+                         1.0)  # dt=1 per env step; keep OU dt out of config for consistency
+    policy_has_state = config["exploration_type"] == "ou_noise"
+    policy_state = None
+    if policy_has_state:
+        policy_state = jnp.zeros((env.num_env, *env.action_space(env_params).shape))
 
-    env_state, exprs = batch_rollout(rollout_keys, env, env_state, env_params, policy, num_steps)
+    env_state, exprs = batch_rollout(rollout_keys, env, env_state, env_params, policy, num_steps,
+                                     policy_state=policy_state, policy_has_state=policy_has_state)
     flat_exprs = jax.tree.map(lambda x: jnp.reshape(x, shape=(-1, *x.shape[2:])), exprs)
     buffer_state = buffer.add(buffer_state, flat_exprs)
 
@@ -290,8 +312,7 @@ def train_one_step(
     global_steps = (i_train_step + 1) * rollout_batch_size
     eval_policy = make_policy(env, env_params, 
                               actor_train_state.apply_fn, actor_train_state.params,
-                              "none", 
-                              0., 0.)
+                              "none")
     model_params_to_save = {
         "actor": actor_train_state.params,
         "critic": critic_train_state.params,

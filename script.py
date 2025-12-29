@@ -57,3 +57,66 @@ data = {
 }
 foo_vjit = jax.jit(jax.vmap(foo, in_axes=({'x': 0, 'y': None},)))
 foo_vjit(data)
+
+#%%
+# brownian motion visualization
+
+import matplotlib.pyplot as plt
+import jax
+from jax import numpy as jnp, random
+
+
+def generate_traj(key):
+    increments = random.normal(key, (N, 2))*SIGMA
+
+    traj = jnp.cumulative_sum(increments, axis=0)
+    X, Y = jnp.split(traj, 2, axis=1)
+    return X, Y
+
+N = 100
+N_TRAJ = 5
+SIGMA = 0.1
+key = random.key(0)
+keys = random.split(key, N_TRAJ)
+Xs, Ys = jax.vmap(generate_traj)(keys)
+
+fig, ax = plt.subplots()
+for i in range(N_TRAJ):
+    ax.plot(Xs[i], Ys[i])
+ax.set_aspect(aspect='equal', adjustable="box")
+
+
+#%%
+# OU process
+
+import matplotlib.pyplot as plt
+import jax
+from jax import numpy as jnp, random
+
+# N = 100
+# N_TRAJ = 10
+# SIGMA = 0.1
+THETA = 0.4; MU = 0.; DT = 0.05
+key = random.key(0)
+
+def generate_traj(key):
+    normal_noise = random.normal(key, (N, 2))
+    def fn(x, noise):
+        dx = THETA*(MU - x)*DT + SIGMA*noise
+        x = x + dx
+        return x, x
+
+    x, xs = jax.lax.scan(fn, jnp.array([0., 0.]), normal_noise)
+    Xs, Ys = jnp.split(xs, 2, axis=1)
+    return Xs, Ys
+
+key = random.key(0)
+keys = random.split(key, N_TRAJ)
+Xs, Ys = jax.vmap(generate_traj)(keys)
+
+fig, ax = plt.subplots()
+for i in range(N_TRAJ):
+    ax.plot(Xs[i], Ys[i])
+ax.set_aspect(aspect='equal', adjustable="box")
+
+# %%

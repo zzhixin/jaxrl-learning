@@ -5,18 +5,25 @@ from jax import numpy as jnp
 from gymnax.wrappers import LogWrapper
 
 
-def rollout(key, env, env_state, env_params, policy, rollout_num_steps=100, collect_state=False, return_dict=True):
+def rollout(key, env, env_state, env_params, policy, rollout_num_steps=100,
+            collect_state=False, return_dict=True, policy_state=None, policy_has_state=False):
+    if policy_state is None:
+        policy_state = jnp.zeros((1,))
     # checkify.check(isinstance(env, TerminationTruncationWrapper), "env should be TerminationTruncationWrapper")
 
-    def policy_step(env_state_and_key, _):
-        state, key = env_state_and_key
+    def policy_step(carry, _):
+        state, key, policy_state = carry
         if 'env_state' in state.__dir__():
             obs = env.get_obs(state.env_state, env_params)
         else:
             obs = env.get_obs(state, env_params)
         key, key_act, key_step = jax.random.split(key, 3)
         # action = env.action_space(env_params).sample(key_act_cur)
-        action = policy(key_act, obs)
+        if policy_has_state:
+            action, next_policy_state = policy(key_act, obs, policy_state)
+        else:
+            action = policy(key_act, obs)
+            next_policy_state = policy_state
         next_obs, next_state, reward, ter, tru, info = env.step(key_step, state, action, env_params)
         if collect_state:
             if return_dict:
@@ -29,16 +36,23 @@ def rollout(key, env, env_state, env_params, policy, rollout_num_steps=100, coll
             else:
                 transition = (obs, action, reward, next_obs, ter, tru, info)
         obs, state = next_obs, next_state
-        env_state_and_key = (state, key)
-        return env_state_and_key, transition
+        carry = (state, key, next_policy_state)
+        return carry, transition
     
-    (env_state, key), exprs = \
-        jax.lax.scan(policy_step, (env_state, key), None, rollout_num_steps)
+    (env_state, key, _), exprs = \
+        jax.lax.scan(policy_step, (env_state, key, policy_state), None, rollout_num_steps)
     
     return env_state, exprs
 
 
 #%%
-def batch_rollout(keys, env, env_states, env_params, policy, rollout_num_steps=100):
-    b_rollout = jax.vmap(rollout, in_axes=(0, None, 0, None, None, None))
-    return b_rollout(keys, env, env_states, env_params, policy, rollout_num_steps)
+def batch_rollout(keys, env, env_states, env_params, policy, rollout_num_steps=100,
+                  policy_state=None, policy_has_state=False):
+    if policy_state is None:
+        policy_state = jnp.zeros((1,))
+        b_rollout = jax.vmap(rollout, in_axes=(0, None, 0, None, None, None, None, None, None, None))
+        return b_rollout(keys, env, env_states, env_params, policy, rollout_num_steps,
+                         False, True, policy_state, policy_has_state)
+    b_rollout = jax.vmap(rollout, in_axes=(0, None, 0, None, None, None, None, None, 0, None))
+    return b_rollout(keys, env, env_states, env_params, policy, rollout_num_steps,
+                     False, True, policy_state, policy_has_state)

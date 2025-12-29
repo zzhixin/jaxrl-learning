@@ -22,6 +22,24 @@ def eps_greedy_policy_continuous(key, obs, env, env_params, actor, actor_params,
     return (rand_action * cond + action * (1-cond))
 
 
+class OrnsteinUhlenbeckActionNoise(object):
+    def __init__(self, mu, sigma, theta, dt, x0=None):
+        self.mu = mu
+        self.sigma = sigma
+        self.theta = theta
+        self.dt = dt
+        self.x0 = x0
+
+    def sample(self, key, x, shape):
+        # Based on https://en.wikipedia.org/wiki/Ornstein%E2%80%93Uhlenbeck_process
+        # dXt = theta * (mu - Xt) * dt + sigma * sqrt(dt) * dWt
+        # Approximate with Euler-Maruyama method.
+        # Here, x is the previous state.
+        noise = self.sigma * jnp.sqrt(self.dt) * random.normal(key, shape=shape)
+        x_new = x + self.theta * (self.mu - x) * self.dt + noise
+        return x_new, x_new # Return noise and new state
+
+
 def save_model(config, model_params, run_name, model_name):
     # path = ocp.test_utils.erase_and_create_empty(config["ckpt_path"])
     path = Path(config["ckpt_path"])
