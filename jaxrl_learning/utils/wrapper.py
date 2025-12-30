@@ -11,7 +11,7 @@ from functools import partial
 class TerminationTruncationWrapper(GymnaxWrapper):
 
     def __init__(self, env):
-        checkify.check(isinstance(env, LogWrapper), "Wrapped env should be LogWrapper")
+        # checkify.check(isinstance(env, LogWrapper), "Wrapped env should be LogWrapper")
         self._env = env
 
     def __getattr__(self, name):

@@ -3,7 +3,7 @@ configs:
     seed: 0
     project_name: jaxrl
     env_name: Pendulum-v1
-    total_timesteps: 200000
+    total_timesteps: 300000
     features: [128, 64]
     lr_critic: 0.001
     lr_actor: 0.0005
@@ -35,7 +35,7 @@ configs:
     seed: 0
     project_name: jaxrl
     env_name: MountainCarContinuous-v0
-    total_timesteps: 200000
+    total_timesteps: 300000
     features: [128, 64]
     lr_critic: 0.001
     lr_actor: 0.001
@@ -45,7 +45,7 @@ configs:
     exploration_type: ou_noise
     exploration_noise: 0.5
     exploration_noise_end: 0.0
-    exploration_noise_decay: true
+    exploration_noise_decay: false
     ou_theta: 0.15
     epsilon_start: 1.0
     epsilon_end: 0.05

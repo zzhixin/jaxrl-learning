@@ -36,16 +36,16 @@ if __name__ == "__main__":
 
     configs = load_configs(Path(args.config))
 
-    from jaxrl_learning.algos.ddpg import check_config, run_training
+    from jaxrl_learning.algos.ddpg import check_config, main
 
     if args.all:
         for env_name, config in configs.items():
             print(f"Running env: {env_name}")
             check_config(config)
-            run_training(config)
+            main(config)
     else:
         if args.single_env not in configs:
             raise ValueError(f"Unknown env: {args.single_env}. Available: {list(configs.keys())}")
         config = configs[args.single_env]
         check_config(config)
-        run_training(config)
+        main(config)

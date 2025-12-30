@@ -3,6 +3,7 @@ from functools import partial
 import jax
 from jax import numpy as jnp, random
 from pathlib import Path
+import atexit
 import orbax.checkpoint as ocp
 
 
@@ -40,6 +41,26 @@ class OrnsteinUhlenbeckActionNoise(object):
         return x_new, x_new # Return noise and new state
 
 
+_BEST_MODEL_INFO = {"path": None, "run_name": None, "model_name": None}
+_FINALIZER_REGISTERED = False
+
+
+def _finalize_best_model_artifact():
+    try:
+        import wandb
+    except Exception:
+        return
+    if wandb.run is None:
+        return
+    info = _BEST_MODEL_INFO
+    if not info["path"] or not Path(info["path"]).exists():
+        return
+    artifact_name = f"{info['run_name']}-best-model"
+    artifact = wandb.Artifact(artifact_name, type="model")
+    artifact.add_dir(str(info["path"]))
+    wandb.run.log_artifact(artifact, aliases=["best"])
+
+
 def save_model(config, model_params, run_name, model_name):
     # path = ocp.test_utils.erase_and_create_empty(config["ckpt_path"])
     use_wandb = False
@@ -62,6 +83,18 @@ def save_model(config, model_params, run_name, model_name):
     with ocp.StandardCheckpointer() as ckptr:
         ckptr.save(model_path, model_params)
     jax.debug.print(f"{model_name} saved.")
+    if use_wandb and model_name == "best_model":
+        _BEST_MODEL_INFO["path"] = model_path
+        _BEST_MODEL_INFO["run_name"] = run_name
+        _BEST_MODEL_INFO["model_name"] = model_name
+        global _FINALIZER_REGISTERED
+        if not _FINALIZER_REGISTERED:
+            atexit.register(_finalize_best_model_artifact)
+            _FINALIZER_REGISTERED = True
+
+
+def log_best_model_artifact():
+    _finalize_best_model_artifact()
     
 
 def make_save_model(config, run_name, model_name):

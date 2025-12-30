@@ -25,7 +25,7 @@ from jaxrl_learning.utils.wrapper import LogWrapper, TerminationTruncationWrappe
 from jaxrl_learning.utils.replay_buffer import ReplayBuffer, ReplayBufferState, make_replay_buffer
 from jaxrl_learning.utils.rollout import batch_rollout, rollout
 from jaxrl_learning.utils.evals import make_eval_continuous
-from jaxrl_learning.utils.utils import make_save_model
+from jaxrl_learning.utils.utils import make_save_model, log_best_model_artifact
 import pprint
 from datetime import datetime
 import colorama
@@ -52,7 +52,7 @@ config = {
     "exploration_type": "ou_noise", # "none", "normal_noise", "epsilon_greedy", "ou_noise"
     "exploration_noise": 0.5,
     "exploration_noise_end": 0.0,
-    "exploration_noise_decay": True,
+    "exploration_noise_decay": False,
     "ou_theta": 0.15,
     "epsilon_start": 1.0,
     "epsilon_end": 0.05,
@@ -453,48 +453,63 @@ def prepare(key, config):
     return env, test_env, buffer, train_state
 
 
-def run_training(config):
+def train(config, key):
+    # TODO: For vmapped multi-run logging, pre-create W&B runs in Python and pass a
+    # per-run integer run_id into train; use jax.debug.callback to route metrics to
+    # a host-side {run_id -> wandb.Run} map. This is fragile under vmap ordering and
+    # can be slow; keep it optional.
     # extrac configurations
     rollout_batch_size = config["train_interval"]
     num_train_steps = config["total_timesteps"] // rollout_batch_size
-    run_name = config["env_name"] + "__ddpg__" + datetime.now().strftime('%Y%m%d_%H%M%S')
-    if not config['silent']:
-        print(f"config:\n{pprint.pformat(config)}")
-
-    # wandb
-    if config["wandb"]:
-        wandb.init(
-            project=config["project_name"],
-            name=run_name,
-            config=config,
-        )
+    run_name = config["run_name"]
 
     # prepare components
-    key = random.key(config["seed"])
     key, init_key = random.split(key)
     env, test_env, buffer, train_state = prepare(init_key, config)
 
     train_one_step = make_train_one_step(config, run_name, env, test_env, buffer)
 
     # training loop
-    print("start training...")
-    start_time = time.time()
     train_state, metrics = jax.lax.scan(train_one_step, train_state, jnp.arange(num_train_steps))
-    train_state = jax.block_until_ready(train_state)
-    print(f"{Fore.BLUE}Training finished in {time.time() - start_time:.2f}s")
 
-    # parse train_state
     (
         env_params, env_states, test_env_params, buffer_state,
         actor_train_state, critic_train_state,
-        metrics, key
+        metrics_last, key
     ) = train_state
+    return metrics, actor_train_state, critic_train_state
+
+
+train = jax.jit(train, static_argnames=("config",))
+
+
+def main(config):
+    run_name = config["env_name"] + "__ddpg__" + datetime.now().strftime('%Y%m%d_%H%M%S')
+    if not config['silent']:
+        print(f"config:\n{pprint.pformat(config)}")
+
+    config = freeze({**config, "run_name": run_name})
 
     if config["wandb"]:
+        wandb.init(
+            project=config["project_name"],
+            name=run_name,
+            config=unfreeze(config),
+        )
+
+    key = random.key(config["seed"])
+    print("start training...")
+    start_time = time.time()
+    metrics, actor_train_state, critic_train_state = train(config, key)
+    metrics = jax.block_until_ready(metrics)
+    print(f"{Fore.BLUE}Training finished in {time.time() - start_time:.2f}s")
+
+    if config["wandb"]:
+        log_best_model_artifact()
         wandb.finish()
     return metrics, actor_train_state, critic_train_state
 
 
 if __name__ == "__main__":
     check_config(config)
-    run_training(config)
+    main(config)

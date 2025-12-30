@@ -58,65 +58,84 @@ data = {
 foo_vjit = jax.jit(jax.vmap(foo, in_axes=({'x': 0, 'y': None},)))
 foo_vjit(data)
 
-#%%
-# brownian motion visualization
-
-import matplotlib.pyplot as plt
-import jax
-from jax import numpy as jnp, random
-
-
-def generate_traj(key):
-    increments = random.normal(key, (N, 2))*SIGMA
-
-    traj = jnp.cumulative_sum(increments, axis=0)
-    X, Y = jnp.split(traj, 2, axis=1)
-    return X, Y
-
-N = 100
-N_TRAJ = 5
-SIGMA = 0.1
-key = random.key(0)
-keys = random.split(key, N_TRAJ)
-Xs, Ys = jax.vmap(generate_traj)(keys)
-
-fig, ax = plt.subplots()
-for i in range(N_TRAJ):
-    ax.plot(Xs[i], Ys[i])
-ax.set_aspect(aspect='equal', adjustable="box")
-
 
 #%%
-# OU process
-
-import matplotlib.pyplot as plt
+import flax.linen as nn
+import jax.numpy as jnp
+import jax.random as random
 import jax
-from jax import numpy as jnp, random
+from jaxrl_learning.algos.ddpg import ActorNet, QNet, prepare, config, make_policy
+jax.config.update("jax_platform_name", "cpu")
+from flax.core.frozen_dict import FrozenDict, freeze, unfreeze
+import pprint
 
-# N = 100
-# N_TRAJ = 10
-# SIGMA = 0.1
-THETA = 0.4; MU = 0.; DT = 0.05
-key = random.key(0)
 
-def generate_traj(key):
-    normal_noise = random.normal(key, (N, 2))
-    def fn(x, noise):
-        dx = THETA*(MU - x)*DT + SIGMA*noise
-        x = x + dx
-        return x, x
+def prepare_pure(key, config):
+    env, test_env, buffer, train_state = prepare(key, config)
+    return train_state
 
-    x, xs = jax.lax.scan(fn, jnp.array([0., 0.]), normal_noise)
-    Xs, Ys = jnp.split(xs, 2, axis=1)
-    return Xs, Ys
+train_state = prepare_pure(random.key(0), config)
+(
+    env_params, env_states, test_env_params, buffer_state,
+    actor_train_state, critic_train_state,
+    metrics, key
+) = train_state
 
-key = random.key(0)
-keys = random.split(key, N_TRAJ)
-Xs, Ys = jax.vmap(generate_traj)(keys)
 
-fig, ax = plt.subplots()
-for i in range(N_TRAJ):
-    ax.plot(Xs[i], Ys[i])
-ax.set_aspect(aspect='equal', adjustable="box")
+config = freeze(config)
+train_state_jit = jax.jit(prepare_pure, static_argnums=1)(random.key(0), config)
+(
+    env_params, env_states, test_env_params, buffer_state,
+    actor_train_state, critic_train_state,
+    metrics, key
+) = train_state_jit
+env_states = jax.block_until_ready(env_states)
 
-# %%
+
+def strip_apply_fn(ts):
+    return ts.replace(apply_fn=None, tx=None)
+
+
+def strip_state(state):
+    (
+        env_params, env_states, test_env_params, buffer_state,
+        actor_ts, critic_ts,
+        metrics, key
+    ) = state
+    return (
+        env_params, env_states, test_env_params, buffer_state,
+        strip_apply_fn(actor_ts), strip_apply_fn(critic_ts),
+        metrics, key
+    )
+
+
+state_a = strip_state(train_state)
+state_b = strip_state(train_state_jit)
+
+
+def diff_leaf(x1, x2):
+    x1 = jnp.asarray(x1)
+    x2 = jnp.asarray(x2)
+    if str(x1.dtype).startswith("key<"):
+        x1 = jax.random.key_data(x1)
+        x2 = jax.random.key_data(x2)
+    if x1.dtype == jnp.bool_:
+        return float(jnp.mean(x1 != x2))
+    return float(jnp.mean(x1 - x2))
+
+
+diff = jax.tree.map(diff_leaf, state_a, state_b)
+
+
+def colorize(value):
+    if value == 0.0:
+        return f"\033[32m{value:.6g}\033[0m"
+    return f"\033[31m{value:.6g}\033[0m"
+
+
+leaves, _ = jax.tree_util.tree_flatten(diff)
+print("diff leaves:")
+for v in leaves:
+    print(colorize(float(v)))
+diff = None
+pprint.pp(diff)
