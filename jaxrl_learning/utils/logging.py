@@ -1,44 +1,24 @@
-#%% Epsilon-greedy policy
-from functools import partial
+from flax.core.frozen_dict import freeze, unfreeze
 import jax
-from jax import numpy as jnp, random
+import wandb
 from pathlib import Path
 import atexit
 import orbax.checkpoint as ocp
 
 
-def eps_greedy_policy(key, obs, env, env_params, qnet, qnet_params, eps):
-    key, key1, key2 = random.split(key, 3)
-    cond = random.uniform(key1) < eps
-    rand_action = env.action_space(env_params).sample(key2)
-    q_action = qnet.apply(qnet_params, obs).argmax()
-    return (rand_action * cond + q_action * (1-cond)).astype(jnp.int32)
+def make_log_metrics_callback(config):
+    def log_metrics_callback(metrics, global_steps):
+        metrics_to_log = unfreeze(metrics)
+        if not global_steps % config["eval_interval"] == 0:
+            for key in metrics_to_log.copy():
+                if 'eval' in key:
+                    del metrics_to_log[key]
+        if not config["silent"]:
+            print(f"global_steps: {global_steps},  episode_return: {metrics["eval/episodic_return"]}")
+        if config["wandb"]:
+            wandb.log(metrics_to_log)
 
-
-def eps_greedy_policy_continuous(key, obs, env, env_params, actor, actor_params, eps):
-    key, key1, key2 = random.split(key, 3)
-    cond = random.uniform(key1) < eps
-    rand_action = env.action_space(env_params).sample(key2)
-    action = actor.apply(actor_params, obs)
-    return (rand_action * cond + action * (1-cond))
-
-
-class OrnsteinUhlenbeckActionNoise(object):
-    def __init__(self, mu, sigma, theta, dt, x0=None):
-        self.mu = mu
-        self.sigma = sigma
-        self.theta = theta
-        self.dt = dt
-        self.x0 = x0
-
-    def sample(self, key, x, shape):
-        # Based on https://en.wikipedia.org/wiki/Ornstein%E2%80%93Uhlenbeck_process
-        # dXt = theta * (mu - Xt) * dt + sigma * sqrt(dt) * dWt
-        # Approximate with Euler-Maruyama method.
-        # Here, x is the previous state.
-        noise = self.sigma * jnp.sqrt(self.dt) * random.normal(key, shape=shape)
-        x_new = x + self.theta * (self.mu - x) * self.dt + noise
-        return x_new, x_new # Return noise and new state
+    return log_metrics_callback
 
 
 _BEST_MODEL_INFO = {"path": None, "run_name": None, "model_name": None}
@@ -82,7 +62,8 @@ def save_model(config, model_params, run_name, model_name):
         shutil.rmtree(model_path)
     with ocp.StandardCheckpointer() as ckptr:
         ckptr.save(model_path, model_params)
-    jax.debug.print(f"{model_name} saved.")
+    if not config["silent"]:
+        jax.debug.print(f"{model_name} saved.")
     if use_wandb and model_name == "best_model":
         _BEST_MODEL_INFO["path"] = model_path
         _BEST_MODEL_INFO["run_name"] = run_name
@@ -108,3 +89,18 @@ def make_save_model(config, run_name, model_name):
     def save_model_(model_params):
         return save_model(config, model_params, run_name, model_name)
     return save_model_
+
+
+# def make_logging_and_save(config, run_name):
+#     def logging_and_save(global_steps, metrics, model_params_to_save, is_best_model):
+#         if config["save_model"]:
+#             save_model_fn = make_save_model(config, run_name, "best_model")
+#             jax.lax.cond((global_steps % config["eval_interval"] == 0) & is_best_model,
+#                         lambda: jax.debug.callback(save_model_fn, model_params_to_save),
+#                         lambda: None)
+
+#         log_metrics_callback = make_log_metrics_callback(config)
+#         jax.lax.cond(global_steps % config["log_interval"] == 0,
+#                     lambda: jax.debug.callback(log_metrics_callback, metrics, global_steps),
+#                     lambda: None)
+#     return logging_and_save

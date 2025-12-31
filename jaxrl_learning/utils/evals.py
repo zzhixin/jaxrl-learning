@@ -7,11 +7,10 @@ import numpy as np
 from typing import Sequence
 from jaxrl_learning.utils.wrapper import LogWrapper, TerminationTruncationWrapper
 from jaxrl_learning.utils.replay_buffer_old import ReplayBuffer, ReplayBufferState, Experience
-from jaxrl_learning.utils.utils import eps_greedy_policy, eps_greedy_policy_continuous
+from jaxrl_learning.utils.policy import eps_greedy_policy, eps_greedy_policy_continuous
 from jaxrl_learning.utils.rollout import rollout, batch_rollout
 from functools import partial
 from jax.experimental import checkify
-from jaxrl_learning.utils.utils import save_model
 
 
 #%%

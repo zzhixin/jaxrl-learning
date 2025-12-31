@@ -1,6 +1,6 @@
 configs:
   Pendulum-v1:
-    seed: 0
+    seed: [0, 1, 2, 3, 4]
     project_name: jaxrl
     env_name: Pendulum-v1
     total_timesteps: 300000
@@ -27,12 +27,13 @@ configs:
     eval_num_steps: 2000
     eval_num_env: 16
     log_interval: 8192
-    wandb: true
+    wandb: false
     ckpt_path: /home/zhixin/jaxrl-learning/ckpts/
     silent: false
+    save_model: false,
 
   MountainCarContinuous-v0:
-    seed: 0
+    seed: [0, 1, 2, 3, 4]
     project_name: jaxrl
     env_name: MountainCarContinuous-v0
     total_timesteps: 300000
@@ -59,6 +60,7 @@ configs:
     eval_num_steps: 2000
     eval_num_env: 16
     log_interval: 8192
-    wandb: true
+    wandb: false
     ckpt_path: /home/zhixin/jaxrl-learning/ckpts/
     silent: false
+    save_model: false,
