@@ -2,6 +2,7 @@ configs:
   Pendulum-v1:
     seed: [0, 1, 2, 3, 4]
     project_name: jaxrl
+    exp_name: ddpg
     env_name: Pendulum-v1
     total_timesteps: 300000
     features: [128, 64]
@@ -27,14 +28,17 @@ configs:
     eval_num_steps: 2000
     eval_num_env: 16
     log_interval: 8192
-    wandb: false
+    wandb: true
     ckpt_path: /home/zhixin/jaxrl-learning/ckpts/
     silent: false
-    save_model: false,
+    save_model: true
+    run_name: null
+    vmap_run: true
 
   MountainCarContinuous-v0:
     seed: [0, 1, 2, 3, 4]
     project_name: jaxrl
+    exp_name: ddpg
     env_name: MountainCarContinuous-v0
     total_timesteps: 300000
     features: [128, 64]
@@ -44,10 +48,11 @@ configs:
     tau: 0.001
     target_update_interval: 1
     exploration_type: ou_noise
-    exploration_noise: 0.5
+    exploration_noise: 0.8
     exploration_noise_end: 0.0
     exploration_noise_decay: false
     ou_theta: 0.15
+    # ou_theta: 0.
     epsilon_start: 1.0
     epsilon_end: 0.05
     exploration_fraction: 0.9
@@ -60,7 +65,9 @@ configs:
     eval_num_steps: 2000
     eval_num_env: 16
     log_interval: 8192
-    wandb: false
+    wandb: true
     ckpt_path: /home/zhixin/jaxrl-learning/ckpts/
     silent: false
-    save_model: false,
+    save_model: true
+    run_name: null
+    vmap_run: true

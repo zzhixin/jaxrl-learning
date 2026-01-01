@@ -57,23 +57,3 @@
 # }
 # foo_vjit = jax.jit(jax.vmap(foo, in_axes=({'x': 0, 'y': None},)))
 # foo_vjit(data)
-
-#%%
-import jax
-from jax import numpy as jnp, random
-
-
-def bar(x, scale):
-    def make_foo(scale):
-        def foo(x):
-            return x*scale + 1
-        return foo
-    foo = make_foo(scale)
-    return foo(x)
-
-bar_jit = jax.jit(bar, static_argnums=(1,))
-x = jnp.ones(4)
-bar_jit(x, 1)
-print(bar_jit._cache_size())
-bar_jit(x, 1)
-print(bar_jit._cache_size())
