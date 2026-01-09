@@ -75,7 +75,10 @@ class LogWrapper(GymnaxWrapper):
     #   def __init__(self, env: environment.Environment):
     #     super().__init__(env)
 
-    @partial(jax.jit, static_argnames=("self",))
+    def get_obs(self, state, params=None, key=None):
+        return self._env.get_obs(state.env_state, params, key)
+
+    # @partial(jax.jit, static_argnames=("self",))
     def reset(
         self, key: jax.Array, params: environment.EnvParams | None = None
     ) -> tuple[jax.Array, LogEnvState]:
@@ -83,7 +86,7 @@ class LogWrapper(GymnaxWrapper):
         state = LogEnvState(env_state, jnp.float32(0.), 0, jnp.float32(0.), 0)
         return obs, state
 
-    @partial(jax.jit, static_argnames=("self",))
+    # @partial(jax.jit, static_argnames=("self",))
     def step(
         self,
         key: jax.Array,

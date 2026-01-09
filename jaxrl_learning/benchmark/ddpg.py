@@ -24,7 +24,7 @@ def load_configs(config_path: Path):
     return {name: DDPGConfig.from_dict(cfg) for name, cfg in configs.items()}
 
 
-def sweep_seeds(config):
+def sweep_seeds(config: DDPGConfig):
     """
     Vmap on random seeds. \n
     Metrics are tracked (wandb) after all computation.
@@ -96,7 +96,7 @@ def sweep_seeds(config):
                 settings=wandb.Settings(quiet=True),
             )
             wandb.config = {}
-            rollout_batch_size = config.train_interval
+            rollout_batch_size = config.update_interval
             num_updates = config.total_timesteps // rollout_batch_size
             log_per_update = config.log_interval // rollout_batch_size
             for t_update in range(0, num_updates, log_per_update):

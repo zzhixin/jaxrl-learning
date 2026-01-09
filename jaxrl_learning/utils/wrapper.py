@@ -1,29 +1,27 @@
-#%%
 import jax
 from jax import numpy as jnp, random
+from jax.experimental import checkify
+from flax.core.frozen_dict import freeze
+from flax import struct
 from gymnax.wrappers import LogWrapper
 from gymnax.wrappers.purerl import GymnaxWrapper, LogEnvState
 from gymnax.environments import environment
-from jax.experimental import checkify
-from functools import partial
+from gymnax.environments import spaces
+from brax import envs
+from brax.envs.wrappers.training import AutoResetWrapper, EpisodeWrapper
+from brax.envs.base import PipelineEnv
+from typing import ClassVar, Optional
 
 
 class TerminationTruncationWrapper(GymnaxWrapper):
 
-    def __init__(self, env):
-        # checkify.check(isinstance(env, LogWrapper), "Wrapped env should be LogWrapper")
-        self._env = env
-
-    def __getattr__(self, name):
-        return self._env.__getattr__(name)
-
-    @partial(jax.jit, static_argnames=("self",))
+    # @partial(jax.jit, static_argnames=("self",))
     def reset(
         self, key: jax.Array, params: environment.EnvParams | None = None
     ) -> tuple[jax.Array, LogEnvState]:
         return self._env.reset(key, params)
 
-    @partial(jax.jit, static_argnames=("self",))
+    # @partial(jax.jit, static_argnames=("self",))
     def step(
         self,
         key: jax.Array,
@@ -53,27 +51,185 @@ class TerminationTruncationWrapper(GymnaxWrapper):
         return obs, state, reward, termination, truncation, info
 
 
-# key = jax.random.key(0)
-# key, reset_key, rollout_key = jax.random.split(key, 3)
+@struct.dataclass
+class RunningMeanStdState:
+    mean: jnp.ndarray | float
+    var: jnp.ndarray | float
+    count: jnp.ndarray | float
 
-# env, env_params = gymnax.make("CartPole-v1")
-# env = TerminationTruncationWrapper(LogWrapper(env))
-# print(env._env)
 
-# env_params = env_params.replace(max_steps_in_episode=5)
+class RunningMeanStd:
+    """Tracks the mean, variance and count of values."""
+    # https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Parallel_algorithm
+    def __init__(self, epsilon=1e-4):
+        """Tracks the mean, variance and count of values."""
+        self.epsilon = epsilon
+    
+    def init(self, x: jnp.array):
+        state = RunningMeanStdState(
+            mean = jnp.zeros_like(x),
+            var = jnp.ones_like(x),
+            count = self.epsilon,
+        )
+        return state
 
-# obs, state = env.reset(reset_key, env_params)
-# # print(env.get_obs(state.env_state))
-# pprint.pp(state)
+    def update(self, state: RunningMeanStdState, x):
+        """Updates the mean, var and count from a batch of samples."""
+        batch_mean = jnp.mean(x, axis=0)
+        batch_var = jnp.var(x, axis=0)
+        batch_count = x.shape[0]
+        
+        mean, var, count = state.mean, state.var, state.count
 
-# for t in range(40):
-#     rollout_key, act_key, step_key = random.split(rollout_key, 3)
-#     action = env.action_space(env_params).sample(act_key)
-#     next_obs, next_state, reward, ter, tru, info = env.step(step_key, state, action, env_params)
-#     # if done:
-#         # print(f"t: {t}\ndone: {done}\ninfo: {pprint.pformat(info)}")
-#     print(f"t: {t}\ntermination: {ter}\ntruncation: {tru}\ninfo: {pprint.pformat(info)}")
-#     # pprint.pp(state)  
+        delta = batch_mean - mean
+        tot_count = count + batch_count
 
-#     obs, state = next_obs, next_state
+        new_mean = mean + delta * batch_count / tot_count
+        m_a = var * count
+        m_b = batch_var * batch_count
+        M2 = m_a + m_b + jnp.square(delta) * count * batch_count / tot_count
+        new_var = M2 / tot_count
+        new_count = tot_count
 
+        return RunningMeanStdState(mean=new_mean, var=new_var, count=new_count)
+
+
+class NormalizeObservation(GymnaxWrapper):
+    """Normalizes observations to be centered at the mean with unit variance.\n
+    WARN: unlike gymnasium, each reset will reset the running mean std of the observation.\n
+    This wrapper alters the env_params and env_state's structure, which will be 
+    ```
+        FrozenDict({"env_params": original_env_params, "obs_rms_state": obs_rms_state})
+        FrozenDict({"env_state": original_env_state, "obs_rms_state": obs_rms_state})
+    ```
+
+    The `self.default_params` will contain a initial obs_rms_state. You should retain the env_params after `gymnax.make`.
+    Or you can manually pass the env_params with your obs_rms_state to `self.reset`, then it will return a env_state with 
+    the denoted obs_rms_state. After that, the obs_rms_state will be transformed along with env_state until next reset.
+    The `self.step` will not respect the env_params.\n
+    Changing the env_state's obs_rms_state is not recommanded just like don't change env_state except for `env.step`. You should only 
+    change the obs_rms_state using reset. 
+
+    ### training env proceduce
+    ```
+    env, _ = gymnax.make(env_name)
+    env = NormalizeObservation(env)
+    env_params = env.default_params
+    obs, env_state = env.reset(key, env_params)
+    ...
+    ```
+
+    ### evaluation env proceduce
+    ```
+    obs_rms_state = get_rms_state()
+    env, env_params = gymnax.make(env_name)
+    env = NormalizeObservation(env)
+    env_params = freeze({"env_params": env_params, "obs_rms_state": obs_rms_state})
+    obs, env_state = env.reset(key, env_params)
+    ...
+    ```
+    """
+
+    def __init__(self, env, epsilon: float = 1e-8, eval=False):
+        """This wrapper will normalize observations such that each observation is centered with unit variance.
+
+        Args:
+            env (Env): The environment to apply the wrapper
+            epsilon: A stability parameter that is used when scaling the observations.
+        """
+        super().__init__(env)
+
+        self.obs_rms = RunningMeanStd(epsilon=epsilon)
+        self.epsilon = epsilon
+        self._eval = eval
+        self._update_running_mean = not eval
+        
+    def observation_space(self, env_params):
+        """Observation space of the environment."""
+        env_params = env_params["env_params"]
+        obs_shape = self._env.observation_space(env_params).shape
+        return spaces.Box(-jnp.inf, jnp.inf, obs_shape, jnp.float32)   
+
+    def action_space(self, env_params):
+        """Observation space of the environment."""
+        env_params = env_params["env_params"]
+        return self._env.action_space(env_params)
+
+    @property
+    def default_params(self):
+        obs_shape = self._env.observation_space(self._env.default_params).shape
+        obs_rms_state = RunningMeanStdState(
+            mean=jnp.zeros(obs_shape),
+            var=jnp.ones(obs_shape),
+            count=self.epsilon,
+        )
+        return freeze({"env_params": self._env.default_params,
+                       "obs_rms_state": obs_rms_state})
+    
+    def get_obs(self, env_state, env_params=None, key=None):
+        if env_params:
+            env_params = env_params["env_params"]
+        obs_rms_state = env_state["obs_rms_state"]
+        raw_obs = self._env.get_obs(env_state["env_state"], env_params, key)
+        obs = (raw_obs - obs_rms_state.mean) / jnp.sqrt(obs_rms_state.var + self.epsilon)
+        return obs
+
+    def _observation(self, raw_obs, obs_rms_state):
+        """Normalises the observation using the running mean and variance of the observations."""
+        # raw_obs = super().get_obs(state)
+        if self._update_running_mean:
+            obs_rms_state = self.obs_rms.update(obs_rms_state, jnp.array([raw_obs]))
+        obs = (raw_obs - obs_rms_state.mean) / jnp.sqrt(obs_rms_state.var + self.epsilon)
+        return obs, obs_rms_state 
+
+    def reset(self, key, env_params):
+        obs_rms_state = env_params["obs_rms_state"]
+        env_params = env_params["env_params"]
+        obs, state = self._env.reset(key, env_params)
+        obs, obs_rms_state = self._observation(obs, obs_rms_state)
+        state = freeze({"env_state": state, "obs_rms_state": obs_rms_state})
+        return obs, state
+
+    def step(self, key, state, action, env_params):
+        env_params = env_params["env_params"]
+        obs_rms_state = state["obs_rms_state"]
+        obs, state, *others = self._env.step(key, state["env_state"], action, env_params)
+        obs, obs_rms_state = self._observation(obs, obs_rms_state)
+        state = freeze({"env_state": state, "obs_rms_state": obs_rms_state})
+        return obs, state, *others
+
+
+class Brax2GymWrapper(environment.Environment):
+    """A wrapper that converts Brax Env to one that follows Gymnax API."""
+
+    def __init__(
+        self, env: PipelineEnv, seed: int = 0, backend: Optional[str] = None
+    ):
+        self._env = AutoResetWrapper(EpisodeWrapper(env, episode_length=1000, action_repeat=1))
+        self.backend = backend
+
+    def observation_space(self, params):
+        obs = jnp.inf * jnp.ones(self._env.observation_size, dtype='float32')
+        return spaces.Box(-obs, obs, (self._env.observation_size,), dtype='float32')
+    
+    def action_space(self, params):
+        action = jax.tree.map(jnp.array, self._env.sys.actuator.ctrl_range)
+        return spaces.Box(action[:, 0], action[:, 1], action.shape[:-1], dtype='float32')
+    
+    @property
+    def default_params(self) -> environment.EnvParams:
+        """Default environment parameters for Pendulum-v0."""
+        return environment.EnvParams(max_steps_in_episode=self._env.episode_length)
+
+    def reset(self, key, params):
+        state = self._env.reset(key)
+        return state.obs, state
+
+    def step(self, key, state, action, params):
+        state = self._env.step(state, action)
+        # info = {**state.metrics, **state.info}
+        info = {}
+        return state.obs, state, state.reward, state.done, info
+    
+    def get_obs(self, state, params=None, key=None):
+        return state.obs

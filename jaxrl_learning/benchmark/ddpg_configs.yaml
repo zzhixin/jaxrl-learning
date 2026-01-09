@@ -20,7 +20,7 @@ configs:
     epsilon_end: 0.05
     exploration_fraction: 0.5
     num_env: 1
-    train_interval: 4
+    update_interval: 4
     train_batch_size: 64
     buffer_size: 1000000
     learning_start: 10000
@@ -57,7 +57,7 @@ configs:
     epsilon_end: 0.05
     exploration_fraction: 0.9
     num_env: 1
-    train_interval: 4
+    update_interval: 4
     train_batch_size: 64
     buffer_size: 100000
     learning_start: 10000
@@ -71,3 +71,40 @@ configs:
     save_model: true
     run_name: null
     vmap_run: true
+
+  Ant-brax:
+    seed: 0
+    exp_name: ddpg
+    project_name: jaxrl
+    env_name: Ant-brax
+    norm_obs: true
+    total_timesteps: 50000000
+    features: [256, 256]
+    lr_critic: 3e-4
+    lr_actor: 3e-4
+    gamma: 0.99
+    tau: 0.001
+    target_update_interval: 1
+    exploration_type: normal_noise
+    exploration_noise: 0.2
+    exploration_noise_end: 0.0
+    exploration_noise_decay: false
+    ou_theta: 0.15
+    epsilon_start: 1.0
+    epsilon_end: 0.05
+    exploration_fraction: 0.9
+    num_env: 1024
+    update_interval: 256
+    train_batch_size: 1024
+    buffer_size: 1e6
+    learning_start: 1e5
+    eval_interval: 4194304
+    eval_num_steps: 2000
+    eval_num_env: 16
+    log_interval: 4194304
+    wandb: true
+    save_model: true
+    run_name: null
+    ckpt_path: /home/zhixin/jaxrl-learning/ckpts/
+    silent: false
+    vmap_run: false

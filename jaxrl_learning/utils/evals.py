@@ -98,7 +98,8 @@ def make_eval_discrete(metrics, policy, env, env_params, num_env, num_steps, glo
 
 def make_eval_continuous(
         metrics,
-        policy, env, env_params, num_env, num_steps, 
+        policy, env, env_params,
+        num_env, num_steps, 
         global_steps):
     def eval_(key):
         nonlocal metrics

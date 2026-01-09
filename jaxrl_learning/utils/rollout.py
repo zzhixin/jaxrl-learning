@@ -13,10 +13,7 @@ def rollout(key, env, env_state, env_params, policy, rollout_num_steps=100,
 
     def policy_step(carry, _):
         state, key, policy_state = carry
-        if 'env_state' in state.__dir__():
-            obs = env.get_obs(state.env_state, env_params)
-        else:
-            obs = env.get_obs(state, env_params)
+        obs = env.get_obs(state)
         key, key_act, key_step = jax.random.split(key, 3)
         # action = env.action_space(env_params).sample(key_act_cur)
         if policy_has_state:
@@ -45,7 +42,6 @@ def rollout(key, env, env_state, env_params, policy, rollout_num_steps=100,
     return env_state, exprs
 
 
-#%%
 def batch_rollout(keys, env, env_states, env_params, policy, rollout_num_steps=100,
                   policy_state=None, policy_has_state=False):
     if policy_state is None:

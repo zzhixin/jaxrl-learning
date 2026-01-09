@@ -136,4 +136,5 @@ registered_envs = [
     "Reacher-misc",
     "Swimmer-misc",
     "Pong-misc",
+    "Ant-brax",
 ]

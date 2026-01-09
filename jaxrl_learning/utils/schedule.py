@@ -4,7 +4,7 @@ from jax import numpy as jnp, random
 
 # epsilon Schedule
 def epsilon_schedule(i_step, config):
-    num_updates = config["total_timesteps"] // config["train_interval"]
+    num_updates = config["total_timesteps"] // config["update_interval"]
     steps_fraction = i_step / (num_updates * config["exploration_fraction"])
     eps = jnp.interp(steps_fraction,
                     jnp.array([0., 1.]),
@@ -13,7 +13,7 @@ def epsilon_schedule(i_step, config):
 
 # noise Schedule (for normal_noise and ou_noise), decays over full training
 def noise_std_schedule(i_step, config):
-    num_updates = config["total_timesteps"] // config["train_interval"]
+    num_updates = config["total_timesteps"] // config["update_interval"]
     if not config["exploration_noise_decay"]:
         return config["exploration_noise"]
     steps_fraction = i_step / num_updates

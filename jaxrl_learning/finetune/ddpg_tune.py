@@ -30,7 +30,7 @@ BASE_CONFIG = replace(
     epsilon_end=0.05,
     exploration_fraction=0.9,
     num_env=1,
-    train_interval=4,
+    update_interval=4,
     train_batch_size=64,
     buffer_size=1e5,
     learning_start=1e4,
@@ -72,7 +72,7 @@ metrics, *_ = tune(batch_config, keys)
 #%%
 episodic_return = metrics["eval/episodic_return"]
 print(episodic_return.shape)
-evals_per_logging = BASE_CONFIG.eval_interval // BASE_CONFIG.train_interval
+evals_per_logging = BASE_CONFIG.eval_interval // BASE_CONFIG.update_interval
 # episodic_return = episodic_return[...,::evals_per_logging]
 
 average_episodic_return = jnp.nanmean(episodic_return, axis=(-1, -2))
