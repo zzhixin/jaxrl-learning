@@ -12,6 +12,7 @@ wheels/
 # logs
 wandb/
 ckpts/
+nohup.out
 
 # others
 .vscode

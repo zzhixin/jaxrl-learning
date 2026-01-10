@@ -3,6 +3,7 @@
 import warnings
 warnings.filterwarnings("ignore")
 import gymnax
+from gymnax.wrappers.purerl import LogWrapper
 import numpy as np
 import jax
 jax.config.update("jax_platform_name", "cpu")
@@ -20,11 +21,11 @@ import wandb
 from dataclasses import dataclass, replace
 from typing import Tuple, Union
 
-from jaxrl_learning.utils.wrapper import LogWrapper, TerminationTruncationWrapper
+from jaxrl_learning.utils.wrapper import TerminationTruncationWrapper
 from jaxrl_learning.utils.replay_buffer import ReplayBuffer, ReplayBufferState, make_replay_buffer
 from jaxrl_learning.utils.rollout import batch_rollout, rollout
 from jaxrl_learning.utils.evals import make_eval_continuous
-from jaxrl_learning.utils.policy import make_policy
+from jaxrl_learning.utils.policy import make_policy_continuous
 from jaxrl_learning.utils.schedule import epsilon_schedule, noise_std_schedule
 from jaxrl_learning.utils.track import make_track_and_save_callback, save_model, upload_best_model_artifact
 from jaxrl_learning.utils.config import BaseConfig
@@ -131,7 +132,7 @@ def make_collect(cfg: DDPGConfig, env, buffer: ReplayBuffer, rollout_num_steps: 
                 metrics):
         rollout_keys = jax.random.split(key, env.num_env)
 
-        policy = make_policy(env, env_params, 
+        policy = make_policy_continuous(env, env_params, 
                             actor_train_state.apply_fn, actor_train_state.params,
                             cfg.exploration_type,
                             eps_cur, 
@@ -257,7 +258,7 @@ def make_train_one_step(cfg: DDPGConfig, run_name, env, test_env, buffer):
 
         # evaluation
         global_steps = (i_train_step + 1) * rollout_batch_size
-        eval_policy = make_policy(env, env_params, 
+        eval_policy = make_policy_continuous(env, env_params, 
                                 actor_train_state.apply_fn, actor_train_state.params,
                                 "none")
         eval = make_eval_continuous(

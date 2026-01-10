@@ -4,6 +4,7 @@ configs:
     project_name: jaxrl
     exp_name: ddpg
     env_name: Pendulum-v1
+    norm_obs: false
     total_timesteps: 300000
     features: [128, 64]
     lr_critic: 0.001
@@ -40,6 +41,7 @@ configs:
     project_name: jaxrl
     exp_name: ddpg
     env_name: MountainCarContinuous-v0
+    norm_obs: false
     total_timesteps: 300000
     features: [128, 64]
     lr_critic: 0.001
@@ -80,8 +82,8 @@ configs:
     norm_obs: true
     total_timesteps: 50000000
     features: [256, 256]
-    lr_critic: 3e-4
-    lr_actor: 3e-4
+    lr_critic: 0.0003
+    lr_actor: 0.0003
     gamma: 0.99
     tau: 0.001
     target_update_interval: 1
@@ -96,8 +98,8 @@ configs:
     num_env: 1024
     update_interval: 256
     train_batch_size: 1024
-    buffer_size: 1e6
-    learning_start: 1e5
+    buffer_size: 1000000
+    learning_start: 100000
     eval_interval: 4194304
     eval_num_steps: 2000
     eval_num_env: 16

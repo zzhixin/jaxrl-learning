@@ -25,11 +25,12 @@ from typing import Tuple, Union
 from jaxrl_learning.utils.replay_buffer import ReplayBuffer, ReplayBufferState, make_replay_buffer
 from jaxrl_learning.utils.rollout import batch_rollout, rollout
 from jaxrl_learning.utils.evals import make_eval_continuous
-from jaxrl_learning.utils.policy import make_policy
+from jaxrl_learning.utils.policy import make_policy_continuous
 from jaxrl_learning.utils.schedule import epsilon_schedule, noise_std_schedule
 from jaxrl_learning.utils.track import make_track_and_save_callback, save_model, upload_best_model_artifact
 from jaxrl_learning.utils.config import BaseConfig
 from jaxrl_learning.utils.env_factory import make_env
+from jaxrl_learning.utils.running_mean import RunningMeanStd, RunningMeanStdState
 
 import pprint
 from datetime import datetime
@@ -45,7 +46,7 @@ class DDPGConfig(BaseConfig):
     project_name: str = "jaxrl"
     # env_name: str = "MountainCarContinuous-v0"
     env_name: str = "Ant-brax"
-    norm_obs: bool = True
+    norm_obs: bool = False
     total_timesteps: int = 50_000_000
     features: Tuple[int, ...] = (256, 256)
     lr_critic: float = 3e-4
@@ -70,7 +71,7 @@ class DDPGConfig(BaseConfig):
     eval_num_steps: int = 2000
     eval_num_env: int = 16
     log_interval: int = 1024*4096
-    wandb: bool = True
+    wandb: bool = False
     save_model: bool = True
     run_name: str | None = None
     ckpt_path: str = "/home/zhixin/jaxrl-learning/ckpts/"
@@ -122,79 +123,95 @@ class CustomTrainState(TrainState):
     target_params: FrozenDict = struct.field(pytree_node=True)
 
 
-def make_collect(cfg: DDPGConfig, env, buffer: ReplayBuffer, rollout_num_steps: int | jax.Array):
+def make_collect(cfg: DDPGConfig, env, buffer: ReplayBuffer, obs_rms: RunningMeanStd, rollout_num_steps: int | jax.Array):
     def collect(key,
                 actor_train_state: CustomTrainState,
                 env_params: gymnax.EnvParams, env_state: gymnax.EnvState,
+                obs_rms_state: RunningMeanStdState,
                 eps_cur: float,
                 noise_std: float,
                 buffer_state: ReplayBufferState,
                 metrics):
         rollout_keys = jax.random.split(key, env.num_env)
 
-        policy = make_policy(env, env_params, 
-                             actor_train_state.apply_fn, actor_train_state.params,
-                             cfg.exploration_type,
-                             eps_cur, 
-                             noise_std,
-                             cfg.ou_theta,
-                             1.0)  # dt=1 per env step; keep OU dt out of config for consistency
-        policy_has_state = cfg.exploration_type == "ou_noise"
-        policy_state = None
-        if policy_has_state:
+        policy = make_policy_continuous(env, env_params, 
+                                        actor_train_state.apply_fn, actor_train_state.params,
+                                        cfg.norm_obs, obs_rms, obs_rms_state,
+                                        cfg.exploration_type,
+                                        eps_cur, 
+                                        noise_std,
+                                        cfg.ou_theta,
+                                        1.0)  # dt=1 per env step; keep OU dt out of config for consistency
+        policy_state = jnp.zeros(())
+        if cfg.exploration_type == "ou_noise":
             policy_state = jnp.zeros((env.num_env, *env.action_space(env_params).shape))
 
         env_state, exprs = batch_rollout(rollout_keys, env, env_state, env_params, policy, rollout_num_steps,
-                                         policy_state=policy_state, policy_has_state=policy_has_state)
+                                         policy_state=policy_state)
         flat_exprs = jax.tree.map(lambda x: jnp.reshape(x, shape=(-1, *x.shape[2:])), exprs)
+        if cfg.norm_obs:
+            obs_rms_state = obs_rms.update(obs_rms_state, flat_exprs["obs"])
         buffer_state = buffer.add(buffer_state, flat_exprs)
 
         infos = flat_exprs['info']
         metrics = metrics.copy({"charts/episodic_return": jnp.mean(infos['returned_episode_returns']),
                                 "charts/episodic_length": jnp.mean(infos['returned_episode_lengths'])})
 
-        return  env_state, buffer_state, metrics
+        return  env_state, obs_rms_state, buffer_state, metrics
 
     return collect
 
 
-def make_update_model(cfg: DDPGConfig, buffer: ReplayBuffer, buffer_state: ReplayBufferState, num_updates_per_train_step: int, global_train_steps: int):
+def make_update_model(
+    cfg: DDPGConfig,
+    buffer: ReplayBuffer,
+    buffer_state: ReplayBufferState,
+    num_updates_per_train_step: int,
+    global_train_steps: int,
+    obs_rms: RunningMeanStd,
+):
     def update_model(actor_train_state: CustomTrainState, 
                      critic_train_state: CustomTrainState, 
-                     key: random.PRNGKey):
-        critic_params = critic_train_state.params
-        actor_params = actor_train_state.params
-        target_critic_params = critic_train_state.target_params
-        target_actor_params = actor_train_state.target_params
-
-        def batch_critic_loss_fn(critc_params, experiences):
-            def critic_loss_fn(expr):
-                obs, action, reward, next_obs, termination = \
-                    expr['obs'], expr['action'], expr['rew'], expr['next_obs'], expr['ter']
-                next_max_action = actor_train_state.apply_fn(target_actor_params, next_obs)
-                q_next = critic_train_state.apply_fn(target_critic_params, jnp.concat((next_obs, next_max_action), axis=-1))
-                target = reward + cfg.gamma * q_next * (1 - termination)
-                target = jax.lax.stop_gradient(target)
-                q_pred = critic_train_state.apply_fn(critc_params, jnp.concat((obs, action), axis=-1))
-                return (q_pred - target)**2
-
-            return jax.vmap(critic_loss_fn)(experiences).mean()
-
-        def batch_actor_loss_fn(actor_params, experiences):
-            def actor_loss_fn(expr):
-                obs = expr['obs']
-                action = actor_train_state.apply_fn(actor_params, obs)
-                q_pred = critic_train_state.apply_fn(critic_params, jnp.concat((obs, action), axis=-1))
-                return -q_pred
-
-            return jax.vmap(actor_loss_fn)(experiences).mean()
-
+                     key: random.PRNGKey,
+                     obs_rms_state: RunningMeanStdState):
         def update_step(carry, local_updates):
             actor_train_state, critic_train_state, key = carry
             key, sample_key = random.split(key)
             sampled_experiences = buffer.sample(sample_key, buffer_state)
 
             # update model
+            critic_params = critic_train_state.params
+            actor_params = actor_train_state.params
+            target_critic_params = critic_train_state.target_params
+            target_actor_params = actor_train_state.target_params
+
+            def batch_critic_loss_fn(critc_params, experiences):
+                def critic_loss_fn(expr):
+                    obs, action, reward, next_obs, termination = \
+                        expr['obs'], expr['action'], expr['rew'], expr['next_obs'], expr['ter']
+                    if cfg.norm_obs:
+                        obs = obs_rms.normalize(obs, obs_rms_state)
+                        next_obs = obs_rms.normalize(next_obs, obs_rms_state)
+                    next_max_action = actor_train_state.apply_fn(target_actor_params, next_obs)
+                    q_next = critic_train_state.apply_fn(target_critic_params, jnp.concat((next_obs, next_max_action), axis=-1))
+                    target = reward + cfg.gamma * q_next * (1 - termination)
+                    target = jax.lax.stop_gradient(target)
+                    q_pred = critic_train_state.apply_fn(critc_params, jnp.concat((obs, action), axis=-1))
+                    return (q_pred - target)**2
+
+                return jax.vmap(critic_loss_fn)(experiences).mean()
+
+            def batch_actor_loss_fn(actor_params, experiences):
+                def actor_loss_fn(expr):
+                    obs = expr['obs']
+                    if cfg.norm_obs:
+                        obs = obs_rms.normalize(obs, obs_rms_state)
+                    action = actor_train_state.apply_fn(actor_params, obs)
+                    q_pred = critic_train_state.apply_fn(critic_params, jnp.concat((obs, action), axis=-1))
+                    return -q_pred
+
+                return jax.vmap(actor_loss_fn)(experiences).mean()
+
             critic_loss, critic_grads = jax.value_and_grad(batch_critic_loss_fn)(critic_params, sampled_experiences)
             actor_loss, actor_grads = jax.value_and_grad(batch_actor_loss_fn)(actor_params, sampled_experiences)
             actor_train_state = actor_train_state.apply_gradients(grads=actor_grads)
@@ -226,10 +243,11 @@ def make_update_model(cfg: DDPGConfig, buffer: ReplayBuffer, buffer_state: Repla
     return update_model
 
 
-def make_train_one_step(cfg: DDPGConfig, run_name, env, test_env, buffer):
+def make_train_one_step(cfg: DDPGConfig, run_name, env, test_env, buffer, obs_rms):
     def train_one_step(train_state, global_train_steps: int):
         (
-            env_params, env_states, test_env_params, buffer_state,
+            env_params, env_states, test_env_params, 
+            obs_rms_state, buffer_state,
             actor_train_state, critic_train_state,
             best_model_params,
             metrics, key
@@ -247,38 +265,36 @@ def make_train_one_step(cfg: DDPGConfig, run_name, env, test_env, buffer):
         key, rollout_key, sample_key, test_key = jax.random.split(key, 4)
 
         # exploration parameter schedule
-        eps_cur = epsilon_schedule(global_train_steps, cfg)
-        noise_std = noise_std_schedule(global_train_steps, cfg)
+        eps_cur = epsilon_schedule(global_steps, cfg)
+        noise_std = noise_std_schedule(global_steps, cfg)
 
         # collect data
-        collect = make_collect(cfg, env, buffer, rollout_num_steps)
-        env_states, buffer_state, metrics = collect(rollout_key,
-                                                    actor_train_state,
-                                                    env_params, env_states,
-                                                    eps_cur,
-                                                    noise_std,
-                                                    buffer_state,
-                                                    metrics)
+        collect = make_collect(cfg, env, buffer, obs_rms, rollout_num_steps)
+        env_states, obs_rms_state, buffer_state, metrics = collect(rollout_key,
+                                                                   actor_train_state,
+                                                                   env_params, env_states,
+                                                                   obs_rms_state,
+                                                                   eps_cur,
+                                                                   noise_std,
+                                                                   buffer_state,
+                                                                   metrics)
 
         # update model
         is_update_model = global_steps > cfg.learning_start
-        update_model = make_update_model(cfg, buffer, buffer_state, num_updates_per_train_step, global_train_steps)
+        update_model = make_update_model(cfg, buffer, buffer_state, num_updates_per_train_step, global_train_steps, obs_rms)
         actor_train_state, critic_train_state, loss = \
             jax.lax.cond(is_update_model,
                         update_model,
                         lambda *_: (actor_train_state, critic_train_state, 
                                     {'losses/critic_loss': jnp.float32(0.), 'losses/actor_loss': jnp.float32(0.)}),
-                        actor_train_state, critic_train_state, sample_key)
+                        actor_train_state, critic_train_state, sample_key, obs_rms_state)
         metrics = metrics.copy(loss)
 
         # evaluation
         global_steps = (global_train_steps + 1) * rollout_batch_size
-        eval_policy = make_policy(env, env_params, 
-                                actor_train_state.apply_fn, actor_train_state.params,
-                                "none")
-        if config.norm_obs:
-            obs_rms_state = jax.tree.map(lambda x: jnp.mean(x, axis=0), env_states["obs_rms_state"])
-            test_env_params = test_env_params.copy({"obs_rms_state": obs_rms_state})
+        eval_policy = make_policy_continuous(env, env_params, 
+                                             actor_train_state.apply_fn, actor_train_state.params, 
+                                             cfg.norm_obs, obs_rms, obs_rms_state, "none")
         eval = make_eval_continuous(
             metrics, eval_policy, 
             test_env, test_env_params, 
@@ -310,11 +326,11 @@ def make_train_one_step(cfg: DDPGConfig, run_name, env, test_env, buffer):
                         lambda: None)
 
         train_state = (
-            env_params, env_states, test_env_params, buffer_state,
+            env_params, env_states, test_env_params, 
+            obs_rms_state, buffer_state,
             actor_train_state, critic_train_state,
             best_model_params,
-            metrics,
-            key
+            metrics, key
         )
 
         return  train_state, metrics
@@ -325,7 +341,7 @@ def make_train_one_step(cfg: DDPGConfig, run_name, env, test_env, buffer):
 def prepare(key, cfg: DDPGConfig):
     key, init_reset_key, critic_init_key, actor_init_key = jax.random.split(key, 4)
 
-    env, env_params = make_env(cfg.env_name, norm_obs=cfg.norm_obs)
+    env, env_params = make_env(cfg.env_name)
     env.num_env = cfg.num_env
 
     key_resets = random.split(init_reset_key, cfg.num_env)
@@ -342,11 +358,14 @@ def prepare(key, cfg: DDPGConfig):
         rollout_batch=rollout_batch_size,
         sample_batch=cfg.train_batch_size,
     )
-    _, dummy_state = env.reset(random.key(0), env_params)
+    dummy_obs, dummy_state = env.reset(random.key(0), env_params)
     _, dummy_transitions = rollout(random.key(0), env, dummy_state, env_params, 
                                 lambda key, obs: env.action_space(env_params).sample(key),
                                 rollout_num_steps=rollout_batch_size)
     buffer_state = buffer.init(dummy_transitions)
+
+    obs_rms = RunningMeanStd()
+    obs_rms_state = obs_rms.init(dummy_obs)
 
     critic = QNet(features=cfg.features)
     critic_params = critic.init(critic_init_key, jnp.concat((obses, dummy_actions), axis=-1))
@@ -373,7 +392,7 @@ def prepare(key, cfg: DDPGConfig):
         tx=actor_tx,
     )
 
-    test_env, test_env_params = make_env(cfg.env_name, norm_obs=cfg.norm_obs, eval=True)
+    test_env, test_env_params = make_env(cfg.env_name, eval=True)
 
     metrics = FrozenDict({
         "charts/global_steps": 0,
@@ -389,13 +408,15 @@ def prepare(key, cfg: DDPGConfig):
         "actor": actor_train_state.params,
         "critic": critic_train_state.params,
     }
+
     train_state = (
-        env_params, env_states, test_env_params, buffer_state,
+        env_params, env_states, test_env_params, 
+        obs_rms_state, buffer_state,
         actor_train_state, critic_train_state,
         best_model_params,
         metrics, key
     )
-    return env, test_env, buffer, train_state
+    return env, test_env, buffer, obs_rms, train_state
 
 
 def make_train():
@@ -410,20 +431,21 @@ def make_train():
 
         # prepare components
         key, init_key = random.split(key)
-        env, test_env, buffer, train_state = prepare(init_key, cfg)
+        env, test_env, buffer, obs_rms, train_state = prepare(init_key, cfg)
 
-        train_one_step = make_train_one_step(cfg, run_name, env, test_env, buffer)
+        train_one_step = make_train_one_step(cfg, run_name, env, test_env, buffer, obs_rms)
 
         # training loop
-        train_state, metrics = jax.lax.scan(train_one_step, train_state, jnp.arange(num_train_steps))
+        train_state, metrics_log = jax.lax.scan(train_one_step, train_state, jnp.arange(num_train_steps))
 
         (
-            env_params, env_states, test_env_params, buffer_state,
+            env_params, env_states, test_env_params, 
+            obs_rms_state, buffer_state,
             actor_train_state, critic_train_state,
             best_model_params,
-            metrics_last, key
+            metrics, key
         ) = train_state
-        return metrics, actor_train_state, critic_train_state, best_model_params
+        return metrics_log, actor_train_state, critic_train_state, best_model_params
 
     return train
 

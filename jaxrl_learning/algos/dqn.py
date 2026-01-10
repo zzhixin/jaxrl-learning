@@ -3,6 +3,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 import gymnax
+from gymnax.wrappers.purerl import LogWrapper
 import jax
 jax.config.update("jax_platform_name", "cpu")
 from jax import random, numpy as jnp
@@ -19,7 +20,7 @@ from datetime import datetime
 from dataclasses import dataclass, replace
 from typing import Tuple, Union
 
-from jaxrl_learning.utils.wrapper import LogWrapper, TerminationTruncationWrapper
+from jaxrl_learning.utils.wrapper import TerminationTruncationWrapper
 from jaxrl_learning.utils.replay_buffer import ReplayBuffer, ReplayBufferState, make_replay_buffer
 from jaxrl_learning.utils.rollout import batch_rollout, rollout
 from jaxrl_learning.utils.schedule import epsilon_schedule

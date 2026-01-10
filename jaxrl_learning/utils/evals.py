@@ -5,7 +5,7 @@ from jax import random, numpy as jnp
 from flax import struct, linen as nn
 import numpy as np
 from typing import Sequence
-from jaxrl_learning.utils.wrapper import LogWrapper, TerminationTruncationWrapper
+from jaxrl_learning.utils.wrapper import TerminationTruncationWrapper
 from jaxrl_learning.utils.replay_buffer_old import ReplayBuffer, ReplayBufferState, Experience
 from jaxrl_learning.utils.policy import eps_greedy_policy, eps_greedy_policy_continuous
 from jaxrl_learning.utils.rollout import rollout, batch_rollout

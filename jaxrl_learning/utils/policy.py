@@ -1,6 +1,7 @@
 from functools import partial
 import jax
 from jax import numpy as jnp, random
+from jaxrl_learning.utils.running_mean import RunningMeanStd, RunningMeanStdState
 
 
 def eps_greedy_policy(key, obs, env, env_params, qnet, qnet_params, eps):
@@ -37,18 +38,24 @@ class OrnsteinUhlenbeckActionNoise(object):
         return x_new, x_new # Return noise and new state
 
 
-def make_policy(env, env_params, 
-                actor_apply_fn: callable, actor_params,
-                exploration_type: str,
-                eps_cur=None,
-                std=None,
-                ou_theta=None,
-                dt=1.0):
+def make_policy_continuous(env, env_params, 
+                           actor_apply_fn: callable, actor_params,
+                           norm_obs: bool = False,
+                           obs_rms: RunningMeanStd | None = None,
+                           obs_rms_state: RunningMeanStdState = jnp.zeros(()),
+                           exploration_type: str = "none",
+                           eps_cur=None,
+                           std=None,
+                           ou_theta=None,
+                           dt=1.0):
     # Base policy (no exploration)
-    base_policy = lambda key, obs: actor_apply_fn(actor_params, obs)
+    def base_policy(key, obs):
+        if norm_obs:
+            obs = obs_rms.normalize(obs, obs_rms_state)
+        return actor_apply_fn(actor_params, obs)
 
     def normal_noisy_policy_fn(key, obs, std_dev, dt):
-        mean = actor_apply_fn(actor_params, obs)
+        mean = base_policy(actor_params, obs)
         lo = env.action_space(env_params).low
         hi = env.action_space(env_params).high
         action_scale = (hi - lo)/2.
@@ -56,7 +63,7 @@ def make_policy(env, env_params,
         return jnp.clip(mean + noise, lo, hi)
 
     def ou_noise_policy_fn(key, obs, ou_state, theta, sigma, dt):
-        mean = actor_apply_fn(actor_params, obs)
+        mean = base_policy(actor_params, obs)
         lo = env.action_space(env_params).low
         hi = env.action_space(env_params).high
         scale = (hi - lo)/2.
@@ -65,9 +72,9 @@ def make_policy(env, env_params,
             + sigma * jnp.sqrt(dt) * random.normal(key, mean.shape) * scale
         return jnp.clip(mean + noise, lo, hi), noise
 
-    def eps_greedy_policy_fn(key, obs, sub_policy_inner, epsilon):
+    def eps_greedy_policy_fn(key, obs, epsilon):
         key, key1, key2, key3 = random.split(key, 4)
-        action = sub_policy_inner(key3, obs)
+        action = base_policy(key3, obs)
         cond = random.uniform(key1) < epsilon
         rand_action = env.action_space(env_params).sample(key2)
         return (rand_action * cond + action * (1-cond))
@@ -77,7 +84,7 @@ def make_policy(env, env_params,
     elif exploration_type == "normal_noise":
         policy = partial(normal_noisy_policy_fn, std_dev=std, dt=dt)
     elif exploration_type == "epsilon_greedy":
-        policy = partial(eps_greedy_policy_fn, sub_policy_inner=base_policy, epsilon=eps_cur)
+        policy = partial(eps_greedy_policy_fn, epsilon=eps_cur)
     elif exploration_type == "ou_noise":
         policy = partial(ou_noise_policy_fn, theta=ou_theta, sigma=std, dt=dt)
     else:

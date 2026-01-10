@@ -4,7 +4,8 @@ import argparse
 from pathlib import Path
 import yaml
 from jaxrl_learning.algos.ddpg import DDPGConfig, make_train
-from dataclasses import replace
+from dataclasses import fields, replace
+from typing import get_args, get_origin
 from flax.core.frozen_dict import unfreeze
 import wandb
 from datetime import datetime
@@ -22,6 +23,74 @@ def load_configs(config_path: Path):
     if not isinstance(configs, dict):
         raise ValueError("Config file must contain a mapping of env_name to config.")
     return {name: DDPGConfig.from_dict(cfg) for name, cfg in configs.items()}
+
+
+def _parse_int_tuple(value: str) -> tuple[int, ...]:
+    parts = [item.strip() for item in value.split(",") if item.strip()]
+    return tuple(int(item) for item in parts)
+
+
+def _parse_seed(value: str) -> tuple[int, ...]:
+    parts = [item.strip() for item in value.split(",") if item.strip()]
+    return tuple(int(item) for item in parts)
+
+
+def _arg_type_from_field(field_type):
+    origin = get_origin(field_type)
+    if origin is None:
+        return field_type
+    if origin is tuple:
+        return str
+    for arg in get_args(field_type):
+        if arg is not type(None):
+            return arg
+    return str
+
+
+def add_config_args(parser: argparse.ArgumentParser) -> None:
+    for field in fields(DDPGConfig):
+        arg_name = f"--{field.name.replace('_', '-')}"
+        if field.name == "seed":
+            parser.add_argument(
+                arg_name,
+                type=_parse_seed,
+                default=None,
+                help="Override seeds as comma-separated ints (e.g., 0,1,2).",
+            )
+            continue
+        if field.name == "features":
+            parser.add_argument(
+                arg_name,
+                type=_parse_int_tuple,
+                default=None,
+                help="Override features as comma-separated ints (e.g., 256,256).",
+            )
+            continue
+        if field.type is bool:
+            parser.add_argument(
+                arg_name,
+                action=argparse.BooleanOptionalAction,
+                default=None,
+                help=f"Override {field.name}.",
+            )
+            continue
+        parser.add_argument(
+            arg_name,
+            type=_arg_type_from_field(field.type),
+            default=None,
+            help=f"Override {field.name}.",
+        )
+
+
+def apply_overrides(config: DDPGConfig, args: argparse.Namespace) -> DDPGConfig:
+    overrides: dict[str, object] = {}
+    for field in fields(DDPGConfig):
+        value = getattr(args, field.name, None)
+        if value is not None:
+            overrides[field.name] = value
+    if overrides:
+        return replace(config, **overrides)
+    return config
 
 
 def sweep_seeds(config: DDPGConfig):
@@ -60,10 +129,11 @@ def sweep_seeds(config: DDPGConfig):
     elapsed_time = time.perf_counter() - time0
 
     # print summary
+    import pprint
+    pprint.pp(metrics)
     best_episodic_return = metrics["eval/best_episodic_return"][:,-1]
     average_episodic_return = jnp.nanmean(metrics["eval/episodic_return"], axis=1)
     latest_episodic_return = metrics["eval/episodic_return"][:,-1]
-    import pprint
     print("📝 Summary")
     pprint.pp({
         "best episodic return": {
@@ -116,9 +186,11 @@ def sweep_seeds(config: DDPGConfig):
         wandb.finish()
 
 
-_CONFIGS = load_configs(DEFAULT_CONFIG_PATH)
-Pendulum_v1_config = _CONFIGS.get("Pendulum-v1", DDPGConfig())
-MountainCarContinuous_v0_config = _CONFIGS.get("MountainCarContinuous-v0", DDPGConfig())
+def select_single_seed(config: DDPGConfig) -> DDPGConfig:
+    seed = config.seed
+    if isinstance(seed, (list, tuple)):
+        seed = seed[0]
+    return replace(config, seed=seed, vmap_run=False)
 
 
 if __name__ == "__main__":
@@ -128,6 +200,12 @@ if __name__ == "__main__":
         default=str(DEFAULT_CONFIG_PATH),
         help="Path to ddpg config YAML.",
     )
+    parser.add_argument(
+        "--ignore-vmap",
+        action="store_true",
+        help="Ignore multi-seed vmap and run only the first seed.",
+    )
+    add_config_args(parser)
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--all", action="store_true", help="Run all env configs.")
     group.add_argument("--single-env", help="Run a single env by name.")
@@ -140,8 +218,11 @@ if __name__ == "__main__":
     if args.all:
         for env_name, config in configs.items():
             print(f"🌏 Running env: {env_name}")
+            config = apply_overrides(config, args)
+            if args.ignore_vmap:
+                config = select_single_seed(config)
             ddpg.check_config(config)
-            if len(config.seed) > 1:
+            if not args.ignore_vmap and len(config.seed) > 1:
                 sweep_seeds(config)
             else:
                 ddpg.main(config)
@@ -149,8 +230,11 @@ if __name__ == "__main__":
         if args.single_env not in configs:
             raise ValueError(f"Unknown env: {args.single_env}. Available: {list(configs.keys())}")
         config = configs[args.single_env]
+        config = apply_overrides(config, args)
+        if args.ignore_vmap:
+            config = select_single_seed(config)
         ddpg.check_config(config)
-        if len(config.seed) > 1:
+        if not args.ignore_vmap and len(config.seed) > 1:
             sweep_seeds(config)
         else:
             ddpg.main(config)

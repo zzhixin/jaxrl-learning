@@ -180,7 +180,7 @@ def gym_visualize(run_name, model_name="best_model", config_path=None, entity=No
     import orbax.checkpoint as ocp
     import jax
     from jax import random, numpy as jnp
-    from jaxrl_learning.algos.ddpg import QNet, ActorNet, make_policy
+    from jaxrl_learning.algos.ddpg import QNet, ActorNet, make_policy_continuous
 
     config = _load_config(run_name, config_path, entity, project, allow_cloud)
 
@@ -225,7 +225,7 @@ def gym_visualize(run_name, model_name="best_model", config_path=None, entity=No
     actor_params = checkpointer.restore(ckpt_dir, abstract_model_params)["actor"]
 
     # make policy
-    policy = make_policy(env, env_params, actor.apply, actor_params, "none", 0.0, 0.0, 0.0, 1.0)
+    policy = make_policy_continuous(env, env_params, actor.apply, actor_params, "none", 0.0, 0.0, 0.0, 1.0)
 
     # render in gym environment 
     gym_env = gym.make(config["env_name"], render_mode="human")

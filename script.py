@@ -76,7 +76,7 @@ for t in range(2000):
 
 
 #%%
-env_name = 'ant'  
+env_name = 'hopper'  
 backend = 'positional'  
 
 env = Brax2GymWrapper(envs.get_environment(env_name=env_name, backend=backend))
@@ -87,7 +87,6 @@ jit_step = jax.jit(env.step)
 env_params = env.default_params
 obs, state = jit_reset(random.key(0), None)
 
-print(type(state))
 
 #%%
 key = random.key(0)
@@ -150,7 +149,7 @@ key = random.key(0)
 key, key_reset, key_act, key_step = jax.random.split(key, 4)
 
 # Instantiate the environment & its settings.
-env, env_params = make_env("Ant-brax", norm_obs=True)
+env, env_params = make_env("Humanoid-brax", norm_obs=True)
 # env, env_params = make_env("Pendulum-v1", norm_obs=False)
 
 print(env.observation_space(env_params).shape)
@@ -160,7 +159,7 @@ obs, env_state = env.reset(key_reset, env_params)
 print(env_params)
 print(env_state)
 
-policy=lambda key, obs: env.action_space(env_params).sample(key) 
+# policy=lambda key, obs: env.action_space(env_params).sample(key) 
 # env_state, exprs = rollout_fn(random.key(0), 
 #                               env, env_state, env_params,
 #                               policy=lambda key, obs: env.action_space(env_params).sample(key), 
@@ -169,14 +168,14 @@ policy=lambda key, obs: env.action_space(env_params).sample(key)
 # obses = exprs['obs']
 # print(jnp.mean(obses, axis=0), jnp.var(obses, axis=0))
 
-keys = random.split(random.key(0), 4)
-obs, env_state = jax.vmap(env.reset, in_axes=(0, None))(keys, env_params)
-env_state, exprs = batch_rollout(keys, env, env_state, env_params, 
-                                 policy, rollout_num_steps=10000)
+# keys = random.split(random.key(0), 4)
+# obs, env_state = jax.vmap(env.reset, in_axes=(0, None))(keys, env_params)
+# env_state, exprs = batch_rollout(keys, env, env_state, env_params, 
+#                                  policy, rollout_num_steps=10000)
 
-obses = exprs['obs']
-print(jnp.mean(obses, axis=1), jnp.var(obses, axis=1), sep="\n")
-pprint.pp(env_state["obs_rms_state"])
+# obses = exprs['obs']
+# print(jnp.mean(obses, axis=1), jnp.var(obses, axis=1), sep="\n")
+# pprint.pp(env_state["obs_rms_state"])
 
 
 

@@ -2,13 +2,10 @@
 from functools import partial
 import jax
 from jax import numpy as jnp
-from gymnax.wrappers import LogWrapper
 
 
 def rollout(key, env, env_state, env_params, policy, rollout_num_steps=100,
-            collect_state=False, return_dict=True, policy_state=None, policy_has_state=False):
-    if policy_state is None:
-        policy_state = jnp.zeros((1,))
+            collect_state=False, return_dict=True, policy_state=jnp.zeros(())):
     # checkify.check(isinstance(env, TerminationTruncationWrapper), "env should be TerminationTruncationWrapper")
 
     def policy_step(carry, _):
@@ -16,7 +13,7 @@ def rollout(key, env, env_state, env_params, policy, rollout_num_steps=100,
         obs = env.get_obs(state)
         key, key_act, key_step = jax.random.split(key, 3)
         # action = env.action_space(env_params).sample(key_act_cur)
-        if policy_has_state:
+        if len(jnp.shape(policy_state)) > 0:
             action, next_policy_state = policy(key_act, obs, policy_state)
         else:
             action = policy(key_act, obs)
@@ -43,12 +40,11 @@ def rollout(key, env, env_state, env_params, policy, rollout_num_steps=100,
 
 
 def batch_rollout(keys, env, env_states, env_params, policy, rollout_num_steps=100,
-                  policy_state=None, policy_has_state=False):
-    if policy_state is None:
-        policy_state = jnp.zeros((1,))
-        b_rollout = jax.vmap(rollout, in_axes=(0, None, 0, None, None, None, None, None, None, None))
+                  policy_state=jnp.zeros(())):
+    if len(jnp.shape(policy_state)) == 0:
+        b_rollout = jax.vmap(rollout, in_axes=(0, None, 0, None, None, None, None, None, None))
         return b_rollout(keys, env, env_states, env_params, policy, rollout_num_steps,
-                         False, True, policy_state, policy_has_state)
-    b_rollout = jax.vmap(rollout, in_axes=(0, None, 0, None, None, None, None, None, 0, None))
+                         False, True, policy_state)
+    b_rollout = jax.vmap(rollout, in_axes=(0, None, 0, None, None, None, None, None, 0))
     return b_rollout(keys, env, env_states, env_params, policy, rollout_num_steps,
-                     False, True, policy_state, policy_has_state)
+                     False, True, policy_state)
