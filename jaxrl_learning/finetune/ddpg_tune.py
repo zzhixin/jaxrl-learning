@@ -1,4 +1,5 @@
 #%%
+import jaxrl_learning
 import os
 from pathlib import Path
 import sys
@@ -51,8 +52,8 @@ def make_tune(batch_config, base_config):
 
     def _train(batch_config, key):
         config = replace(base_config, **batch_config)
-        train = make_train()
-        return train(config, key)
+        train = make_train(config)
+        return train(key)
     
     v_train = jax.vmap(_train, in_axes=(None, 0))
     for param in reversed(list(batch_config.keys())):
@@ -65,7 +66,7 @@ exploration_noise = jnp.linspace(0.0, 1.0, 11)
 ou_theta = jnp.linspace(0.0, 0.5, 11)
 batch_config = {"exploration_noise": exploration_noise,
                 "ou_theta": ou_theta}
-keys = random.split(random.key(0), 5)
+keys = random.split(random.key(0), 1)
 tune = make_tune(batch_config, BASE_CONFIG)
 metrics, *_ = tune(batch_config, keys)
 

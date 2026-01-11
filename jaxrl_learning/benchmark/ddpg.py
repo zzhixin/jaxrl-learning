@@ -1,3 +1,4 @@
+import jaxrl_learning
 import jax
 from jax import numpy as jnp, random
 import argparse
@@ -93,44 +94,9 @@ def apply_overrides(config: DDPGConfig, args: argparse.Namespace) -> DDPGConfig:
     return config
 
 
-def sweep_seeds(config: DDPGConfig):
-    """
-    Vmap on random seeds. \n
-    Metrics are tracked (wandb) after all computation.
-    Extra metrics "charts/relative_walltime" will be tracked. 
-    Treat parallel runs walltime as each run's walltime.
-    """
-    keys = jnp.stack([random.key(seed) for seed in config.seed])
-    config = replace(config, vmap_run=True)
-    if not config.wandb:
-        confirm = input("The benchmark will not be upload to wandb, metrics can be lost. Are you sure?\n\
-1. [Y] Yes, no wandb;\n\
-2. [N] No, I will try later\n").strip()
-        if confirm == "Y":
-            print("Will not upload to wandb")
-        else:
-            print('Aborted.')
-            return 1
-    if not config.save_model:
-        confirm = input("The best model will not be saved. Are you sure?\n\
-1. [Y] Yes, no model save;\n\
-2. [N] No, I will try later\n").strip()
-        if confirm == "Y":
-            print("Will not save model")
-        else:
-            print('Aborted.')
-            return 1
-
-    # train
-    time0 = time.perf_counter()
-    train = jax.jit(jax.vmap(make_train(), in_axes=(None, 0)), static_argnums=0)
-    metrics, _, _, best_model_params = train(config, keys)
-    metrics = jax.block_until_ready(metrics)
-    elapsed_time = time.perf_counter() - time0
-
+def print_sweep_summary(metrics):
     # print summary
     import pprint
-    pprint.pp(metrics)
     best_episodic_return = metrics["eval/best_episodic_return"][:,-1]
     average_episodic_return = jnp.nanmean(metrics["eval/episodic_return"], axis=1)
     latest_episodic_return = metrics["eval/episodic_return"][:,-1]
@@ -150,40 +116,112 @@ def sweep_seeds(config: DDPGConfig):
         }
     })
 
-    # wandb
-    if config.wandb:
-        print("📤 Simulate wandb track")
-        run_name_prefix = config.env_name + "__ddpg"
+
+def sweep_seeds(cfg: DDPGConfig):
+    """
+    Vmap on random seeds. \n
+    Metrics are tracked (wandb) after all computation.
+    Extra metrics "charts/relative_walltime" will be tracked. 
+    Treat parallel runs walltime as each run's walltime.
+    """
+    keys = jnp.stack([random.key(seed) for seed in cfg.seed])
+    cfg = replace(cfg, vmap_run=True)
+    if not cfg.wandb:
+        confirm = input("The benchmark will not be upload to wandb, metrics can be lost. Are you sure?\n\
+1. [Y] Yes, no wandb;\n\
+2. [N] No, I will try later\n").strip()
+        if confirm == "Y":
+            print("Will not upload to wandb")
+        else:
+            print('Aborted.')
+            return 1
+    if not cfg.save_model:
+        confirm = input("The best model will not be saved. Are you sure?\n\
+1. [Y] Yes, no model save;\n\
+2. [N] No, I will try later\n").strip()
+        if confirm == "Y":
+            print("Will not save model")
+        else:
+            print('Aborted.')
+            return 1
+
+    def is_oom_error(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        return "resource_exhausted" in msg or "out of memory" in msg
+
+    # train
+    time0 = time.perf_counter()
+    try:
+        train = jax.jit(jax.vmap(make_train(cfg)))
+        metrics, _, _, best_model_params = jax.block_until_ready(train(keys))
+        elapsed_time = time.perf_counter() - time0
+        print_sweep_summary(metrics)
+        # wandb
+        if cfg.wandb:
+            print("📤 Simulate wandb track")
+            run_name_prefix = cfg.env_name + "__ddpg"
+            run_name_suffix = datetime.now().strftime('%Y%m%d_%H%M%S')
+            for i, seed in enumerate(cfg.seed):
+                i_cfg = replace(cfg, seed=seed)
+                run_name = run_name_prefix+f"__{seed}__"+run_name_suffix
+                wandb.init(
+                    project="jaxrl",
+                    name=run_name,
+                    config=i_cfg.to_dict(),
+                    reinit="finish_previous",
+                    settings=wandb.Settings(quiet=True),
+                )
+                wandb.config = {}
+                rollout_batch_size = cfg.update_interval if cfg.update_interval >= cfg.num_env else cfg.num_env
+                num_train_steps = cfg.total_timesteps // rollout_batch_size
+                logs_per_train_step = cfg.log_interval // rollout_batch_size
+                for global_train_step in range(0, num_train_steps, logs_per_train_step):
+                    global_steps = global_train_step * rollout_batch_size
+                    t_metrics = jax.tree.map(lambda data: data[i][global_train_step], metrics)
+                    t_metrics = unfreeze(t_metrics)
+                    t_metrics["charts/relative_walltime"] = elapsed_time*global_train_step/num_train_steps
+                    if not global_steps % cfg.eval_interval == 0:
+                        for key in t_metrics.copy():
+                            if 'eval' in key:
+                                del t_metrics[key]
+                    wandb.log(t_metrics)
+                if cfg.save_model:
+                    seed_best_params = jax.tree.map(lambda data: data[i], best_model_params)
+                    model_path = save_model(i_cfg.to_dict(), seed_best_params, run_name, "best_model")
+                    upload_best_model_artifact(model_path, run_name, "best_model")
+            wandb.finish()
+
+    except Exception as exc:
+        if not is_oom_error(exc):
+            raise
+        print("⚠️  CUDA OOM during vmap; falling back to sequential seeds.")
+        jax.clear_caches()
+        train = jax.jit(make_train(cfg))
+        run_name_prefix = cfg.env_name + "__ddpg"
         run_name_suffix = datetime.now().strftime('%Y%m%d_%H%M%S')
-        for i, seed in enumerate(config.seed):
-            i_config = replace(config, seed=seed)
+        metrics_list = []
+        for seed in cfg.seed:
+            i_cfg = replace(cfg, seed=seed, vmap_run=False)
+            ddpg.check_config(i_cfg)
             run_name = run_name_prefix+f"__{seed}__"+run_name_suffix
-            wandb.init(
-                project="jaxrl",
-                name=run_name,
-                config=i_config.to_dict(),
-                reinit="finish_previous",
-                settings=wandb.Settings(quiet=True),
-            )
-            wandb.config = {}
-            rollout_batch_size = config.update_interval
-            num_updates = config.total_timesteps // rollout_batch_size
-            log_per_update = config.log_interval // rollout_batch_size
-            for t_update in range(0, num_updates, log_per_update):
-                global_steps = t_update * rollout_batch_size
-                t_metrics = jax.tree.map(lambda data: data[i][t_update], metrics)
-                t_metrics = unfreeze(t_metrics)
-                t_metrics["charts/relative_walltime"] = elapsed_time*t_update/num_updates
-                if not global_steps % config.eval_interval == 0:
-                    for key in t_metrics.copy():
-                        if 'eval' in key:
-                            del t_metrics[key]
-                wandb.log(t_metrics)
-            if config.save_model:
-                seed_best_params = jax.tree.map(lambda data: data[i], best_model_params)
-                model_path = save_model(i_config.to_dict(), seed_best_params, run_name, "best_model")
-                upload_best_model_artifact(model_path, run_name, "best_model")
-        wandb.finish()
+            if i_cfg.wandb:
+                wandb.init(project=i_cfg.project_name, name=run_name, config=i_cfg.to_dict())
+
+            # training
+            key = random.key(seed)
+            train = jax.jit(make_train(i_cfg))
+            metrics, _, _, best_model_params = jax.block_until_ready(train(key))
+
+            if i_cfg.save_model:
+                model_path = save_model(i_cfg.to_dict(), best_model_params, run_name, "best_model")
+                if i_cfg.wandb:
+                    upload_best_model_artifact(model_path, run_name, "best_model")
+            if i_cfg.wandb:
+                wandb.finish()
+
+            metrics_list.append(metrics)
+        all_metrics = jax.tree.map(lambda *xs: jnp.stack(xs), *metrics_list)
+        print_sweep_summary(all_metrics)
 
 
 def select_single_seed(config: DDPGConfig) -> DDPGConfig:

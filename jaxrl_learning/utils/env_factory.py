@@ -20,7 +20,7 @@ def make_env(env_name: str, norm_obs=False, eval=False, **env_kwargs):
 
     env = TerminationTruncationWrapper(LogWrapper(FlattenObservationWrapper(env)))
     if norm_obs:
-        env = NormalizeObservation(env, eval=eval)
+        env = NormalizeObservation(env, update_running_mean=not eval)
 
     env_params = env.default_params
     return env, env_params

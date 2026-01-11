@@ -86,7 +86,7 @@ class NormalizeObservation(GymnaxWrapper):
     ```
     """
 
-    def __init__(self, env, epsilon: float = 1e-8, eval=False):
+    def __init__(self, env, epsilon: float = 1e-8, update_running_mean=True):
         """This wrapper will normalize observations such that each observation is centered with unit variance.
 
         Args:
@@ -94,11 +94,9 @@ class NormalizeObservation(GymnaxWrapper):
             epsilon: A stability parameter that is used when scaling the observations.
         """
         super().__init__(env)
-
-        self.obs_rms = RunningMeanStd(epsilon=epsilon)
-        self.epsilon = epsilon
-        self._eval = eval
-        self._update_running_mean = not eval
+        self._obs_rms = RunningMeanStd(epsilon=epsilon)
+        self._epsilon = epsilon
+        self._update_running_mean = update_running_mean
         
     def observation_space(self, env_params):
         """Observation space of the environment."""
@@ -117,7 +115,7 @@ class NormalizeObservation(GymnaxWrapper):
         obs_rms_state = RunningMeanStdState(
             mean=jnp.zeros(obs_shape),
             var=jnp.ones(obs_shape),
-            count=self.epsilon,
+            count=self._epsilon,
         )
         return freeze({"env_params": self._env.default_params,
                        "obs_rms_state": obs_rms_state})
@@ -127,15 +125,15 @@ class NormalizeObservation(GymnaxWrapper):
             env_params = env_params["env_params"]
         obs_rms_state = env_state["obs_rms_state"]
         raw_obs = self._env.get_obs(env_state["env_state"], env_params, key)
-        obs = (raw_obs - obs_rms_state.mean) / jnp.sqrt(obs_rms_state.var + self.epsilon)
+        obs = (raw_obs - obs_rms_state.mean) / jnp.sqrt(obs_rms_state.var + self._epsilon)
         return obs
 
     def _observation(self, raw_obs, obs_rms_state):
         """Normalises the observation using the running mean and variance of the observations."""
         # raw_obs = super().get_obs(state)
         if self._update_running_mean:
-            obs_rms_state = self.obs_rms.update(obs_rms_state, jnp.array([raw_obs]))
-        obs = (raw_obs - obs_rms_state.mean) / jnp.sqrt(obs_rms_state.var + self.epsilon)
+            obs_rms_state = self._obs_rms.update(obs_rms_state, jnp.array([raw_obs]))
+        obs = (raw_obs - obs_rms_state.mean) / jnp.sqrt(obs_rms_state.var + self._epsilon)
         return obs, obs_rms_state 
 
     def reset(self, key, env_params):
@@ -148,11 +146,38 @@ class NormalizeObservation(GymnaxWrapper):
 
     def step(self, key, state, action, env_params):
         env_params = env_params["env_params"]
-        obs_rms_state = state["obs_rms_state"]
+        obs_rms_state = state["obs_rms_state"] 
         obs, state, *others = self._env.step(key, state["env_state"], action, env_params)
         obs, obs_rms_state = self._observation(obs, obs_rms_state)
         state = freeze({"env_state": state, "obs_rms_state": obs_rms_state})
         return obs, state, *others
+
+
+class TransformObservation(GymnaxWrapper):
+    def __init__(self, env, transform):
+        super().__init__(env)
+        self._transform = transform
+        
+    def observation_space(self, env_params):
+        """Observation space of the environment."""
+        obs_shape = self._env.observation_space(env_params).shape
+        return spaces.Box(-jnp.inf, jnp.inf, obs_shape, jnp.float32)   
+
+    def get_obs(self, env_state, env_params=None, key=None):
+        raw_obs = self._env.get_obs(env_state, env_params, key)
+        obs = self._transform(raw_obs)
+        return obs
+
+    def reset(self, key, env_params):
+        obs, state = self._env.reset(key, env_params)
+        obs = self._transform(obs)
+        return obs, state
+
+    def step(self, key, state, action, env_params):
+        obs, *others = self._env.step(key, state, action, env_params)
+        obs = self._transform(obs)
+        return obs, *others
+
 
 
 class Brax2GymWrapper(environment.Environment):

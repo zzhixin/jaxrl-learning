@@ -2,8 +2,7 @@
 # because it tries to learn a more complex obs-action mapping. And the actor learning
 # is more noisy.
 
-import warnings
-warnings.filterwarnings("ignore")
+import jaxrl_learning
 import gymnax
 import numpy as np
 import jax
@@ -46,7 +45,7 @@ class DDPGConfig(BaseConfig):
     project_name: str = "jaxrl"
     # env_name: str = "MountainCarContinuous-v0"
     env_name: str = "Ant-brax"
-    norm_obs: bool = False
+    norm_obs: bool = True
     total_timesteps: int = 50_000_000
     features: Tuple[int, ...] = (256, 256)
     lr_critic: float = 3e-4
@@ -419,8 +418,13 @@ def prepare(key, cfg: DDPGConfig):
     return env, test_env, buffer, obs_rms, train_state
 
 
-def make_train():
-    def train(cfg: DDPGConfig, key):
+def make_train(cfg: DDPGConfig):
+    """
+    The result function is expected to be vmapped and jitted.
+    WARN: run_name and wandb init (close) should be handled out side the train function.
+    Since they are not jittable.
+    """
+    def train(key):
         # extrac configurations
         if cfg.update_interval >= cfg.num_env:
             rollout_batch_size = cfg.update_interval
@@ -452,14 +456,13 @@ def make_train():
 
 def main(cfg):
     """
-    Handle random seed and wandb.
+    Handle random seed, run_name and wandb.
     """
     # run_name and wandb
-    seed = cfg.seed
-    if isinstance(seed, (list, tuple)):
-        seed = seed[0]
-    run_name = cfg.env_name + "__ddpg__" + f"{seed}__" + datetime.now().strftime('%Y%m%d_%H%M%S')
-    cfg = replace(cfg, run_name=run_name, seed=seed)
+    if isinstance(cfg.seed, (list, tuple)):
+        cfg.seed = cfg.seed[0]
+    run_name = cfg.env_name + "__ddpg__" + f"{cfg.seed}__" + datetime.now().strftime('%Y%m%d_%H%M%S')
+    cfg = replace(cfg, run_name=run_name, seed=cfg.seed)
     if not cfg.vmap_run and cfg.wandb:
         wandb.init(
             project=cfg.project_name,
@@ -474,8 +477,8 @@ def main(cfg):
     if not cfg.silent:
         print("start training...")
     start_time = time.time()
-    train = jax.jit(make_train(), static_argnames=("cfg",))
-    metrics, actor_train_state, critic_train_state, best_model_params = train(cfg, key)
+    train = jax.jit(make_train(cfg))
+    metrics, actor_train_state, critic_train_state, best_model_params = train(key)
     metrics = jax.block_until_ready(metrics)
     if not cfg.silent:
         print(f"{Fore.BLUE}Training finished in {time.time() - start_time:.2f}s")
