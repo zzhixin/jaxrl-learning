@@ -1,7 +1,6 @@
 from functools import partial
 import jax
 from jax import numpy as jnp, random
-from jaxrl_learning.utils.running_mean import RunningMeanStd, RunningMeanStdState
 
 
 def eps_greedy_policy(key, obs, env, env_params, qnet, qnet_params, eps):
@@ -40,18 +39,13 @@ class OrnsteinUhlenbeckActionNoise(object):
 
 def make_policy_continuous(env, env_params, 
                            actor_apply_fn: callable, actor_params,
-                           norm_obs: bool = False,
-                           obs_rms: RunningMeanStd | None = None,
-                           obs_rms_state: RunningMeanStdState = jnp.zeros(()),
                            exploration_type: str = "none",
                            eps_cur=None,
                            std=None,
                            ou_theta=None,
-                           dt=1.0):
+                           dt=1.0): # dt=1 per env step; keep OU dt out of config for consistency
     # Base policy (no exploration)
     def base_policy(key, obs):
-        if norm_obs:
-            obs = obs_rms.normalize(obs, obs_rms_state)
         return actor_apply_fn(actor_params, obs)
 
     def normal_noisy_policy_fn(key, obs, std_dev, dt):
@@ -91,4 +85,3 @@ def make_policy_continuous(env, env_params,
         raise ValueError(f"Unknown exploration_type: {exploration_type}")
 
     return policy
-

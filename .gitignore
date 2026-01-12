@@ -13,6 +13,7 @@ wheels/
 wandb/
 ckpts/
 nohup.out
+html/
 
 # others
 .vscode

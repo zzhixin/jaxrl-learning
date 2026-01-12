@@ -3,11 +3,11 @@ from jax import numpy as jnp, random
 
 
 # epsilon Schedule
-def epsilon_schedule(global_steps, config):
-    steps_fraction = global_steps / config["total_timesteps"]
+def epsilon_schedule(global_steps, cfg):
+    steps_fraction = global_steps / cfg["total_timesteps"]
     eps = jnp.interp(steps_fraction,
                     jnp.array([0., 1.]),
-                    jnp.array([config["epsilon_start"], config["epsilon_end"]]))
+                    jnp.array([cfg["epsilon_start"], cfg["epsilon_end"]]))
     return eps
 
 # noise Schedule (for normal_noise and ou_noise), decays over full training

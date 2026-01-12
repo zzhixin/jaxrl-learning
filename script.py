@@ -199,3 +199,20 @@ for _ in range(50000):
 obses = np.stack(obses)
 print(np.mean(obses, axis=0), np.var(obses, axis=0))
 
+
+#%%
+import jax
+from jax import numpy as jnp, random
+from flax import struct
+
+@struct.dataclass
+class A:
+    a: int
+    def f(self, x):
+        return x + self.a
+
+a = A(a=1)
+a.f(3)
+
+a = a.replace(a=2)
+a.f(3)
